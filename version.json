@@ -1,8 +1,17 @@
-{
-  "version": "1.0.0",
-  "files": [
-    { "name": "Agent.exe",            "sha256": "PUT_SHA256_OF_Agent.exe_HERE" },
-    { "name": "agent.ini",            "sha256": "PUT_SHA256_OF_agent.ini_HERE" },
-    { "name": "opencv_world4100.dll", "sha256": "PUT_SHA256_OF_opencv_world4100.dll_HERE" }
-  ]
+﻿{
+    "version":  "1.0.0",
+    "files":  [
+                  {
+                      "name":  "Agent.exe",
+                      "sha256":  "d370972b8379cc9abbed85c7881bf2233dcde9bd04e507f2f29d019c653bbc80"
+                  },
+                  {
+                      "name":  "agent.ini",
+                      "sha256":  "a3fa77bc4d024925a6c654c4ff683665277945627538995b3b270b7100f6918f"
+                  },
+                  {
+                      "name":  "opencv_world4100.dll",
+                      "sha256":  "e6e31e55b9b377b775782c4b27a80b2460dffe3dbee7898e034d25729dca0198"
+                  }
+              ]
 }
