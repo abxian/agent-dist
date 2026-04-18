@@ -9,7 +9,8 @@
 
 | 文件 | 说明 |
 |---|---|
-| `install-agent.ps1` | 客户端安装/更新脚本(无交互,自动检测更新) |
+| `install-agent.ps1`    | 客户端安装/更新脚本(默认 `-Source auto`,GitHub 优先) |
+| `install-agent-cn.ps1` | 同上,但**默认 `-Source cn`**,国内机器首选 |
 | `gen-version.ps1`   | 发布工具:重新计算 SHA256 并生成 `version.json` |
 | `version.json`      | 版本清单(版本号 + 每个文件的 SHA256) |
 | `Agent.exe`         | Agent 主程序 |
@@ -28,7 +29,12 @@
 
 ### 推荐:最短 `iex` 一键
 
-国内源:
+国内源(`install-agent-cn.ps1`,默认 `-Source cn`,失败自动回退 GitHub):
+```powershell
+iex (irm http://114.80.36.225:15667/6/install-agent-cn.ps1)
+```
+
+通用版(`install-agent.ps1`,默认 `-Source auto`,GitHub 优先):
 ```powershell
 iex (irm http://114.80.36.225:15667/6/install-agent.ps1)
 ```
@@ -37,6 +43,8 @@ GitHub 源:
 ```powershell
 iex (irm https://raw.githubusercontent.com/abxian/agent-dist/main/install-agent.ps1)
 ```
+
+> 两个脚本逻辑完全一致,只是默认 `-Source` 不同。国内机器推荐第一条。
 
 ### 完整命令(等价,但显式落盘)
 
@@ -161,7 +169,8 @@ A: `Get-Content C:\ProgramData\Agent\installed.version`
 
 | 场景 | 命令 |
 |---|---|
-| **客户端首装/升级** | `iex (irm http://114.80.36.225:15667/6/install-agent.ps1)` |
+| **客户端首装/升级(国内推荐)** | `iex (irm http://114.80.36.225:15667/6/install-agent-cn.ps1)` |
+| **客户端首装/升级(自动选源)** | `iex (irm http://114.80.36.225:15667/6/install-agent.ps1)` |
 | **管理端生成清单** | `powershell -ExecutionPolicy Bypass -File .\gen-version.ps1 -Version 1.0.x` |
 | **管理端推 dufs** | `curl.exe -T <文件> http://114.80.36.225:15667/6/<文件>` |
 | **管理端推 GitHub** | GitHub Desktop → Commit to main → Push origin |
