@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "files": [
+    { "name": "Agent.exe",            "sha256": "PUT_SHA256_OF_Agent.exe_HERE" },
+    { "name": "agent.ini",            "sha256": "PUT_SHA256_OF_agent.ini_HERE" },
+    { "name": "opencv_world4100.dll", "sha256": "PUT_SHA256_OF_opencv_world4100.dll_HERE" }
+  ]
+}
