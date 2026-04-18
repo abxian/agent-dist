@@ -6,7 +6,7 @@ Agent 安装 / 自动更新脚本 (国内源版本, 默认 -Source cn)
     powershell -ExecutionPolicy Bypass -File .\install-agent-cn.ps1 -InstallDir "C:\Agent"
     iex (irm http://114.80.36.225:15667/6/install-agent-cn.ps1)
 全程无交互: 自动检测更新 -> 下载 -> 安装/替换。
-默认从国内 dufs (114.80.36.225:15667/6) 下载, 失败时自动回退 GitHub。
+默认从国内 dufs 下载, 失败时自动回退 GitHub。
 #>
 
 [CmdletBinding()]
@@ -133,16 +133,28 @@ $localVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Tr
 
 Write-Log "本地版本: '$localVersion'  远端版本: '$($manifest.version)'"
 
-# ---------- 停止正在运行的 Agent ----------
+# ---------- 停止正在运行的 Agent (优雅 -stop, 兜底 Stop-Process) ----------
 $agentExe = Join-Path $InstallDir 'Agent.exe'
+$installedMarker = Join-Path $InstallDir '.installed'
+$isFirstInstall = -not (Test-Path $installedMarker)
+
+if (Test-Path $agentExe) {
+    try {
+        Write-Log "执行 Agent.exe -stop"
+        $p = Start-Process -FilePath $agentExe -ArgumentList '-stop' -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru
+        $p | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
+    } catch {}
+}
+# 兜底: 强杀残留进程, 释放文件占用
 Get-Process -Name 'Agent' -ErrorAction SilentlyContinue | ForEach-Object {
     try {
         if ($_.Path -and (Split-Path $_.Path -Parent) -eq $InstallDir) {
-            Write-Log "停止进程 Agent.exe (PID=$($_.Id))"
+            Write-Log "强制结束残留 Agent.exe (PID=$($_.Id))"
             $_ | Stop-Process -Force
         }
     } catch {}
 }
+Start-Sleep -Milliseconds 500
 
 # ---------- 下载 / 校验 ----------
 $changed = $false
@@ -197,13 +209,33 @@ foreach ($f in $manifest.files) {
 # ---------- 写入版本 ----------
 Set-Content -Path $versionFile -Value $manifest.version -Encoding ASCII
 
-# ---------- 启动 Agent ----------
-if (Test-Path $agentExe) {
-    Write-Log "启动 Agent.exe"
-    Start-Process -FilePath $agentExe -WorkingDirectory $InstallDir -WindowStyle Hidden
-} else {
+if (-not (Test-Path $agentExe)) {
     Write-Log "Agent.exe 不存在, 安装失败" 'ERROR'
     exit 3
+}
+
+# ---------- 首次安装 (Agent.exe -install 注册服务) ----------
+if ($isFirstInstall) {
+    Write-Log "首次安装, 执行 Agent.exe -install"
+    try {
+        $p = Start-Process -FilePath $agentExe -ArgumentList '-install' -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru -Wait
+        if ($p.ExitCode -ne 0) {
+            Write-Log "Agent.exe -install 退出码=$($p.ExitCode)" 'WARN'
+        }
+    } catch {
+        Write-Log "Agent.exe -install 失败: $($_.Exception.Message)" 'ERROR'
+        exit 4
+    }
+    Set-Content -Path $installedMarker -Value (Get-Date -Format 'o') -Encoding ASCII
+}
+
+# ---------- 启动 (Agent.exe -start) ----------
+Write-Log "启动 Agent.exe -start"
+try {
+    Start-Process -FilePath $agentExe -ArgumentList '-start' -WorkingDirectory $InstallDir -WindowStyle Hidden
+} catch {
+    Write-Log "Agent.exe -start 失败: $($_.Exception.Message)" 'ERROR'
+    exit 5
 }
 
 if ($changed) {
