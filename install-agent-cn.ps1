@@ -22,7 +22,10 @@ param(
     [string]$GithubBranch = 'main',
 
     # 国内源
-    [string]$CnBase = 'http://114.80.36.225:15667/6'
+    [string]$CnBase = 'http://114.80.36.225:15667/6',
+
+    # 显示完整过程日志
+    [switch]$Verbose
 )
 
 $ErrorActionPreference = 'Stop'
@@ -31,8 +34,11 @@ $ErrorActionPreference = 'Stop'
 # ---------- 基础工具 ----------
 function Write-Log {
     param([string]$Msg,[string]$Level='INFO')
+    # 静默模式: 只显示 WARN / ERROR
+    if (-not $Verbose -and $Level -eq 'INFO') { return }
     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    Write-Host "[$ts][$Level] $Msg"
+    $color = switch ($Level) { 'ERROR' { 'Red' } 'WARN' { 'Yellow' } default { 'Gray' } }
+    Write-Host "[$ts][$Level] $Msg" -ForegroundColor $color
 }
 
 function Get-RemoteFile {
@@ -243,3 +249,8 @@ if ($changed) {
 } else {
     Write-Log "完成: 无需更新, 当前版本 $($manifest.version)"
 }
+
+# ---------- 最终成功提示 ----------
+Write-Host ""
+Write-Host "  enjoy work  " -ForegroundColor Green -BackgroundColor Black
+Write-Host ""
