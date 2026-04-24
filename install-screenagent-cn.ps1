@@ -44,7 +44,7 @@ $ManifestName = 'version-screen.json'
 # ---------- 基础工具 ----------
 function Write-Log {
     param([string]$Msg,[string]$Level='INFO')
-    if (-not $Verbose -and $Level -eq 'INFO') { return }
+    if (-not $Verbose -and $Level -ne 'ERROR') { return }
     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $color = switch ($Level) { 'ERROR' { 'Red' } 'WARN' { 'Yellow' } default { 'Gray' } }
     Write-Host "[$ts][$Level] $Msg" -ForegroundColor $color

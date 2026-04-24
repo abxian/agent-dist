@@ -34,8 +34,8 @@ $ErrorActionPreference = 'Stop'
 # ---------- 基础工具 ----------
 function Write-Log {
     param([string]$Msg,[string]$Level='INFO')
-    # 静默模式: 只显示 WARN / ERROR
-    if (-not $Verbose -and $Level -eq 'INFO') { return }
+    # 静默模式: 只显示 ERROR (加 -Verbose 才显示所有级别)
+    if (-not $Verbose -and $Level -ne 'ERROR') { return }
     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $color = switch ($Level) { 'ERROR' { 'Red' } 'WARN' { 'Yellow' } default { 'Gray' } }
     Write-Host "[$ts][$Level] $Msg" -ForegroundColor $color
