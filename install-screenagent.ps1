@@ -23,6 +23,11 @@ param(
     [int]   $ServerPort = 0,
     [string]$ServerPassword = '',
 
+    # 给哪个用户注册登录自启(写 HKU\<SID>\...\Run)
+    # 默认 = 当前跑脚本的用户(= HKCU, 不需要管理员)
+    # 给别人装需要管理员权限; 目标用户没登录时会自动 reg load NTUSER.DAT 后写再 unload
+    [string]$TargetUser = $env:USERNAME,
+
     # GitHub 仓库
     [string]$GithubUser = 'abxian',
     [string]$GithubRepo = 'agent-dist',
@@ -140,24 +145,23 @@ $localVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Tr
 Write-Log "本地版本: '$localVersion'  远端版本: '$($manifest.version)'"
 
 # ---------- 停止正在运行的 ScreenAgent ----------
-# 注意: ScreenAgent 必须以登录用户身份跑在 user session (抓屏 GDI 需要桌面),
-# 所以这里用计划任务 ONLOGON 而不是 Windows 服务 (服务在 Session 0 抓不到屏).
+# 注意: ScreenAgent 必须以登录用户身份跑在 user session (抓屏 GDI 需要桌面).
+# 启动方式 = 写 HKU\<SID>\Software\Microsoft\Windows\CurrentVersion\Run, 登录时由 Explorer 拉起.
 $agentExe = Join-Path $InstallDir 'ScreenAgent.exe'
 $installedMarker = Join-Path $InstallDir '.installed'
 $isFirstInstall = -not (Test-Path $installedMarker)
-$TaskName = 'ScreenAgent'
 
-# 清理老的服务安装(如果存在,从旧版脚本迁移过来)
+# 清理可能存在的旧安装方式(迁移)
 $svc = Get-Service -Name 'RemoteScreenAgent' -ErrorAction SilentlyContinue
 if ($svc) {
-    Write-Log "发现旧的 Windows 服务, 正在清理 (迁移到计划任务模式)"
+    Write-Log "清理旧的 Windows 服务 RemoteScreenAgent"
     try { sc.exe stop   RemoteScreenAgent | Out-Null } catch {}
     Start-Sleep -Seconds 1
     try { sc.exe delete RemoteScreenAgent | Out-Null } catch {}
 }
-
-# 停掉计划任务 + 强杀进程(升级时需要释放 exe 占用)
-try { schtasks /End /TN $TaskName 2>$null | Out-Null } catch {}
+try { schtasks /End    /TN ScreenAgent 2>$null | Out-Null } catch {}
+try { schtasks /Delete /TN ScreenAgent /F 2>$null | Out-Null } catch {}
+try { Remove-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ScreenAgent' -Force -ErrorAction SilentlyContinue } catch {}
 Get-Process -Name 'ScreenAgent' -ErrorAction SilentlyContinue | ForEach-Object {
     try {
         if ($_.Path -and (Split-Path $_.Path -Parent) -eq $InstallDir) {
@@ -255,18 +259,67 @@ Quality=70
     Write-Log "写入 screenagent.ini: Host=$h Port=$p"
 }
 
-# ---------- 注册/更新计划任务 (ONLOGON, 以登录用户身份运行) ────────────────
+# ---------- 注册登录自启动: 写目标用户的 HKU\<SID>\...\Run ────────────────
+# 自己装自己 -> HKCU, 不需要管理员
+# 给别人装    -> HKU\<SID>, 需要管理员; hive 没加载就 reg load 后写完再 unload
+$me      = $env:USERNAME
+$isSelf  = ($TargetUser -eq $me)
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    Write-Log "需要管理员权限 (schtasks 注册任务). 请以管理员身份运行 PowerShell 后重试." 'ERROR'
+
+try {
+    $sid = (New-Object System.Security.Principal.NTAccount($TargetUser)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+} catch {
+    Write-Log "找不到用户: $TargetUser" 'ERROR'
     exit 4
 }
+Write-Log "目标用户=$TargetUser SID=$sid (self=$isSelf admin=$isAdmin)"
 
-$tr = "`"$agentExe`" -run"
-$schOut = schtasks /Create /F /TN $TaskName /SC ONLOGON /RU INTERACTIVE /RL LIMITED /TR $tr 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Log "schtasks 注册失败: $schOut" 'ERROR'
-    exit 4
+$runValueName = 'ScreenAgent'
+$runCmd       = "`"$agentExe`" -run"
+
+if ($isSelf) {
+    New-ItemProperty `
+        -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' `
+        -Name $runValueName -Value $runCmd `
+        -PropertyType String -Force | Out-Null
+    Write-Log "已写 HKCU\\...\\Run\\$runValueName"
+} else {
+    if (-not $isAdmin) {
+        Write-Log "给其他用户 ($TargetUser) 安装需要管理员权限" 'ERROR'
+        exit 4
+    }
+    if (-not (Get-PSDrive -Name HKU -ErrorAction SilentlyContinue)) {
+        New-PSDrive -Name HKU -PSProvider Registry -Root HKEY_USERS | Out-Null
+    }
+    $hivePath   = "HKU:\$sid"
+    $mustUnload = $false
+    if (-not (Test-Path $hivePath)) {
+        $ntuser = "C:\Users\$TargetUser\NTUSER.DAT"
+        if (-not (Test-Path $ntuser)) {
+            Write-Log "找不到 $ntuser (用户从未登录过?)" 'ERROR'
+            exit 4
+        }
+        $loadOut = reg load "HKU\$sid" "$ntuser" 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Log "reg load 失败 (用户可能正登录, 此情况下应让其自己跑脚本): $loadOut" 'ERROR'
+            exit 4
+        }
+        $mustUnload = $true
+    }
+    try {
+        $runKey = "HKU:\$sid\Software\Microsoft\Windows\CurrentVersion\Run"
+        if (-not (Test-Path $runKey)) {
+            New-Item -Path $runKey -Force | Out-Null
+        }
+        Set-ItemProperty -Path $runKey -Name $runValueName -Value $runCmd -Force
+        Write-Log "已写 HKU\\$sid\\...\\Run\\$runValueName"
+    } finally {
+        if ($mustUnload) {
+            [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+            Start-Sleep -Milliseconds 300
+            reg unload "HKU\$sid" | Out-Null
+        }
+    }
 }
 
 if ($isFirstInstall) {
@@ -274,11 +327,15 @@ if ($isFirstInstall) {
 }
 
 # ---------- 启动 ----------
-try {
-    Start-Process -FilePath $agentExe -ArgumentList '-run' -WorkingDirectory $InstallDir -WindowStyle Hidden
-} catch {
-    Write-Log "ScreenAgent.exe -run 启动失败: $($_.Exception.Message)" 'ERROR'
-    exit 5
+if ($isSelf) {
+    try {
+        Start-Process -FilePath $agentExe -ArgumentList '-run' -WorkingDirectory $InstallDir -WindowStyle Hidden
+    } catch {
+        Write-Log "ScreenAgent.exe -run 启动失败: $($_.Exception.Message)" 'ERROR'
+        exit 5
+    }
+} else {
+    Write-Log "目标用户 $TargetUser 下次登录时自动启动"
 }
 
 if ($changed) {
