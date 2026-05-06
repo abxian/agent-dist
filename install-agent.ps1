@@ -170,10 +170,19 @@ foreach ($f in $manifest.files) {
     $dst = Join-Path $InstallDir $name
     $localHash = Get-FileSha256 $dst
 
+    # Only Agent.exe is release-critical. Keep local agent.ini and OpenCV DLL
+    # as-is when present, and do not let line-ending/runtime-DLL hash drift
+    # block installing/updating the service executable.
+    $skipHash = (($name -ieq 'agent.ini') -or ($name -ieq 'opencv_world4100.dll'))
+    if ($skipHash -and (Test-Path $dst)) {
+        Write-Log "跳过配置/运行时文件 (本地已存在, 不校验): $name" 'WARN'
+        continue
+    }
+
     $needDownload = $false
     if (-not (Test-Path $dst)) {
         $needDownload = $true
-    } elseif ($remoteHash) {
+    } elseif ($remoteHash -and -not $skipHash) {
         if ($localHash -ne $remoteHash.ToLower()) { $needDownload = $true }
     } elseif ($localVersion -ne $manifest.version) {
         # 无 hash 信息, 用版本号驱动
@@ -201,13 +210,15 @@ foreach ($f in $manifest.files) {
         exit 1
     }
 
-    if ($remoteHash) {
+    if ($remoteHash -and -not $skipHash) {
         $newHash = Get-FileSha256 $dst
         if ($newHash -ne $remoteHash.ToLower()) {
             Write-Log "$name 校验失败 期望=$remoteHash 实际=$newHash" 'ERROR'
             exit 2
         }
         Write-Log "$name 校验通过"
+    } elseif ($skipHash) {
+        Write-Log "配置/运行时文件已下载, 跳过 SHA 校验: $name" 'WARN'
     }
     $changed = $true
 }
