@@ -1,4 +1,4 @@
-$ScriptFlavor = 'sid-nocv-cn-20260506-registry-provider'
+$ScriptFlavor = 'sid-nocv-cn-20260507-skip-runtime-ini-hash'
 <#
 ScreenAgent SID 安装脚本 (国内源优先)
 
@@ -304,12 +304,12 @@ foreach ($f in $manifest.files) {
     $dst = Join-Path $InstallDir $name
     $localHash = Get-FileSha256 $dst
 
-    # OpenCV runtime is large and stable. Keep an existing local copy as-is,
-    # and do not enforce manifest hash on it; some dufs paths have shown
-    # inconsistent hashes for this DLL even when size matches.
-    $skipHash = ($name -ieq 'opencv_world4100.dll')
+    # OpenCV runtime is large and stable. screenagent.ini is rewritten below
+    # from the configured server fields. Do not let line-ending/hash drift in
+    # these files block installing the actual ScreenAgent.exe.
+    $skipHash = (($name -ieq 'opencv_world4100.dll') -or ($name -ieq 'screenagent.ini'))
     if ($skipHash -and (Test-Path $dst)) {
-        Write-Log "跳过 OpenCV DLL (本地已存在, 不校验): $name" 'WARN'
+        Write-Log "跳过运行时/配置文件 (本地已存在, 不校验): $name" 'WARN'
         continue
     }
 
@@ -351,7 +351,7 @@ foreach ($f in $manifest.files) {
             Fail "$name 校验失败 期望=$remoteHash 实际=$newHash" 31
         }
     } elseif ($skipHash) {
-        Write-Log "OpenCV DLL 已下载, 跳过 SHA 校验: $name" 'WARN'
+        Write-Log "运行时/配置文件已下载, 跳过 SHA 校验: $name" 'WARN'
     }
     $changed = $true
 }
