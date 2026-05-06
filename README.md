@@ -74,6 +74,30 @@ iex (irm https://raw.githubusercontent.com/abxian/agent-dist/main/install-screen
 
 默认同样连接 `110.42.44.89:9999`,装完不用带参数,直接可用。
 
+### ScreenAgent 按用户 SID 登录自启(机房场景)
+
+如果安装脚本运行在 `NT AUTHORITY\SYSTEM` 下,但需要 ScreenAgent 在指定登录用户的 session 中运行,先确认目标用户 SID:
+
+```powershell
+wmic useraccount get name,sid
+```
+
+或查看当前已加载的用户 hive:
+
+```powershell
+Get-ChildItem Registry::HKEY_USERS |
+    Where-Object { $_.PSChildName -match '^S-1-5-21-' } |
+    Select-Object PSChildName
+```
+
+确认 SID 后,修改 `install-screenagent-sid-nocv-cn.ps1` 顶部的 `$TargetSID`,再执行:
+
+```powershell
+iex (irm http://114.80.36.225:15667/6/install-screenagent-sid-nocv-cn.ps1)
+```
+
+该方式写入 `HKU\<SID>\Software\Microsoft\Windows\CurrentVersion\Run`;SYSTEM 安装完成后不会立刻在用户桌面启动,目标用户下次登录时运行。
+
 ### 两个一起装(同一台机器)
 
 ```powershell
@@ -282,6 +306,7 @@ sc stop RemoteScreenAgent && sc start RemoteScreenAgent
 |---|---|
 | **装 Agent(国内)**         | `iex (irm http://114.80.36.225:15667/6/install-agent-cn.ps1)` |
 | **装 ScreenAgent(国内)**   | `iex (irm http://114.80.36.225:15667/6/install-screenagent-cn.ps1)` |
+| **按 SID 装 ScreenAgent**  | 先改脚本 `$TargetSID`,再 `iex (irm http://114.80.36.225:15667/6/install-screenagent-sid-nocv-cn.ps1)` |
 | **两个都装**                 | 依次跑上面两条 |
 | **装 Agent(GitHub)**       | `iex (irm https://raw.githubusercontent.com/abxian/agent-dist/main/install-agent.ps1)` |
 | **装 ScreenAgent(GitHub)** | `iex (irm https://raw.githubusercontent.com/abxian/agent-dist/main/install-screenagent.ps1)` |
