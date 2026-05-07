@@ -16,6 +16,6 @@ $entries = foreach ($f in $Files) {
         sha256 = (Get-FileHash -Algorithm SHA256 $p).Hash.ToLower()
     }
 }
-$obj = [ordered]@{ version = $Version; files = $entries }
+$obj = [ordered]@{ version = $Version; files = @($entries) }
 $obj | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $here $OutFile) -Encoding UTF8
 Write-Host "已生成 $OutFile (version=$Version)"

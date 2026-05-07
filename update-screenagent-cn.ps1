@@ -1,24 +1,22 @@
-﻿$ScriptFlavor = 'sid-nocv-cn-20260507-reuse-sid-autostart'
+﻿$ScriptFlavor = 'update-screenagent-cn-20260507-auto-detect-run-sid'
 <#
-ScreenAgent SID 安装脚本 (国内源优先)
+ScreenAgent 自动更新 / 自动启动脚本 (国内源优先)
 
 用途:
-  给指定 Windows 用户 SID 写入 HKU\<SID>\Software\Microsoft\Windows\CurrentVersion\Run,
-  让 ScreenAgent 在该用户下次登录时以用户 session 运行。
+  自动检测已安装的 ScreenAgent Run 启动项, 复用原 SID,
+  下载新版 ScreenAgent, 更新后尝试在目标用户交互 session 中启动。
 
 示例:
-  1. 修改脚本顶部配置区里的 $TargetSID / $ServerIp / $ServerPort
-  2. 直接执行:
-       iex (irm http://114.80.36.225:15667/6/install-screenagent-sid-cn.ps1)
+  iex (irm http://114.80.36.225:15667/6/update-screenagent-cn.ps1)
 
 说明:
   - 适用于已授权管理的机房/实验室电脑。
-  - SYSTEM 下不会写 S-1-5-18, 只写配置区里的用户 SID。
-  - 给其他 SID 写入 Run 后不会立刻运行, 目标用户下次登录时启动。
+  - 不需要手动填写 SID, 但要求这台电脑之前已经安装过 ScreenAgent。
+  - 首次安装请先使用 install-screenagent-sid-nocv-cn.ps1。
 #>
 
-# ── 配置区: 直接替换这里, 然后用 iex (irm URL) 一键执行 ─────────────────────
-$TargetSID = 'S-1-5-21-4156230380-561108038-141577317-500'
+# ── 配置区 ───────────────────────────────────────────────────────────────────
+$TargetSID = 'REPLACE_WITH_TARGET_USER_SID'
 $ServerIp = '110.42.44.89'
 $ServerPort = 9999
 $ServerPassword = ''
@@ -372,7 +370,7 @@ if ($existingRun) {
 }
 
 if (-not $reusedExistingSid -and ($TargetSID -eq 'REPLACE_WITH_TARGET_USER_SID' -or $TargetSID -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$')) {
-    Fail "请先替换脚本顶部 `$DefaultTargetSID, 或执行时传入 -TargetSID。当前值: $TargetSID" 9
+    Fail "未检测到已安装的 ScreenAgent Run 启动项。首次安装请使用 install-screenagent-sid-nocv-cn.ps1 并填写目标 SID。" 9
 }
 if ($TargetSID -eq 'S-1-5-18') {
     Fail "拒绝写入 SYSTEM SID (S-1-5-18)。请传入真实登录用户 SID。" 10
@@ -578,7 +576,7 @@ if ($isSelf) {
 Set-Content -Path $installedMarker -Value (Get-Date -Format 'o') -Encoding ASCII
 
 Write-Host ""
-Write-Host "  ScreenAgent SID install ready  " -ForegroundColor Green -BackgroundColor Black
+Write-Host "  ScreenAgent update ready  " -ForegroundColor Green -BackgroundColor Black
 Write-Host "  TargetSID: $TargetSID"
 Write-Host "  Command:   $runCmd"
 Write-Host "  Version:   $($manifest.version)"

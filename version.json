@@ -1,13 +1,13 @@
 ﻿{
-    "version":  "1.0.1",
+    "version":  "1.0.2",
     "files":  [
                   {
                       "name":  "Agent.exe",
-                      "sha256":  "fa00f42afb70e68494d9d0997d2764ca69927be5004286fe57241123dac32e7b"
+                      "sha256":  "0f6c0a5512f8606b70490b8c3f1bc2636f2d62df8fc13ff6f42e06468c3921c2"
                   },
                   {
                       "name":  "agent.ini",
-                      "sha256":  "a3fa77bc4d024925a6c654c4ff683665277945627538995b3b270b7100f6918f"
+                      "sha256":  "1810dd390a387026862c7162e897af62221ef169eae6a6019bacda4d2b41d073"
                   },
                   {
                       "name":  "opencv_world4100.dll",

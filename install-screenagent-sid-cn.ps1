@@ -1,4 +1,4 @@
-<#
+﻿<#
 ScreenAgent SID 安装脚本 (国内源优先)
 
 用途:
@@ -372,7 +372,7 @@ ReconnectSeconds=10
 
 [Screen]
 ; JPEG quality 1-100 (higher = clearer but more bandwidth)
-Quality=70
+Quality=100
 "@
     Set-Content -Path $iniPath -Value $iniContent -Encoding ASCII
     Write-Log "写入 screenagent.ini: Host=$h Port=$p" 'WARN'

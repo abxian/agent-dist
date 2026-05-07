@@ -1,13 +1,13 @@
 ﻿{
-    "version":  "1.0.2",
+    "version":  "1.0.4",
     "files":  [
                   {
                       "name":  "ScreenAgent.exe",
-                      "sha256":  "315fbbd4f0ec7745497a3598b9edf66b48b66221c90c20d9418ae92fec806a6f"
+                      "sha256":  "3b2465120422ae2718c74762c8465a01fdfc8e486f91d06d58282defc8c0ff77"
                   },
                   {
                       "name":  "screenagent.ini",
-                      "sha256":  "32f7206729a5f9bb9d3b6e257375508b79ccffc542fbf46535c0f895a2b85778"
+                      "sha256":  "35ff55033ed3f60a93deba49aa5b5879be32cd09572b34ef592a662e09585179"
                   },
                   {
                       "name":  "opencv_world4100.dll",
