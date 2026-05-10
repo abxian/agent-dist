@@ -1,9 +1,9 @@
 ﻿{
-    "version":  "1.0.5",
+    "version":  "1.0.6",
     "files":  [
                   {
                       "name":  "ScreenAgent.exe",
-                      "sha256":  "3b2465120422ae2718c74762c8465a01fdfc8e486f91d06d58282defc8c0ff77"
+                      "sha256":  "4dd3f8d68242e33d497996515f97ea70bab6e36692c710fa02774da3a503c501"
                   },
                   {
                       "name":  "screenagent.ini",
