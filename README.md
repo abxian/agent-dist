@@ -316,3 +316,23 @@ sc stop RemoteScreenAgent && sc start RemoteScreenAgent
 | **查 ScreenAgent 版本**      | `type %ProgramData%\ScreenAgent\installed.version` |
 | **强制重装 Agent**           | 删 `%ProgramData%\Agent\installed.version` → 重跑 iex |
 | **卸载 ScreenAgent**         | `sc stop RemoteScreenAgent; sc delete RemoteScreenAgent; rd /s /q %ProgramData%\ScreenAgent` |
+## RemoteControlAgent install
+
+RemoteControlAgent is independent from Camera Agent and ScreenAgent. It runs in
+the target user's interactive session and provides screen view plus remote mouse
+and keyboard control.
+
+CN source:
+
+```powershell
+iex (irm http://114.80.36.225:15667/6/install-remotecontrolagent-cn.ps1)
+```
+
+GitHub source:
+
+```powershell
+iex (irm https://raw.githubusercontent.com/abxian/agent-dist/main/install-remotecontrolagent.ps1)
+```
+
+For SYSTEM deployment, edit `$TargetSID` at the top of the script before
+publishing or executing it, same as the SID ScreenAgent installer.
