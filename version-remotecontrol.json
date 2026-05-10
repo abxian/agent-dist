@@ -2,12 +2,12 @@
     "version":  "1.0.5",
     "files":  [
                   {
-                      "name":  "Agent.exe",
-                      "sha256":  "169f77571b058b3bf50fdefaf7d3ea68e53a62fa3fbeef9aa48c233d38bf4b03"
+                      "name":  "RemoteControlAgent.exe",
+                      "sha256":  "9474204fe1bcca5bc2ca0d67d8c8a06fbacf7170144cfe71af59f97ce9b39eac"
                   },
                   {
-                      "name":  "agent.ini",
-                      "sha256":  "1810dd390a387026862c7162e897af62221ef169eae6a6019bacda4d2b41d073"
+                      "name":  "remotecontrolagent.ini",
+                      "sha256":  "35ff55033ed3f60a93deba49aa5b5879be32cd09572b34ef592a662e09585179"
                   },
                   {
                       "name":  "opencv_world4100.dll",
