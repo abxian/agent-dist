@@ -113,14 +113,14 @@ function Check-App($title, $dir, $exeName, $iniName, $manifest, $serviceName, $r
     }
 
     $iniData = Read-Ini $ini
-    $host = if ($ServerHostOverride) { $ServerHostOverride } else { $iniData['Server.Host'] }
+    $serverHost = if ($ServerHostOverride) { $ServerHostOverride } else { $iniData['Server.Host'] }
     $portText = if ($ServerPortOverride) { $ServerPortOverride } else { $iniData['Server.Port'] }
     $port = 0
     [void][int]::TryParse([string]$portText, [ref]$port)
-    Check 'Server host' ($(if ($host) { $host } else { 'missing' })) ($(if ($host) { 'OK' } else { 'WARN' }))
+    Check 'Server host' ($(if ($serverHost) { $serverHost } else { 'missing' })) ($(if ($serverHost) { 'OK' } else { 'WARN' }))
     Check 'Server port' ($(if ($port -gt 0) { [string]$port } else { 'missing' })) ($(if ($port -gt 0) { 'OK' } else { 'WARN' }))
-    if ($host -and $port -gt 0) {
-        Check 'Server TCP' "$host`:$port" ($(if (Tcp-Test $host $port) { 'OK' } else { 'BAD' }))
+    if ($serverHost -and $port -gt 0) {
+        Check 'Server TCP' "$serverHost`:$port" ($(if (Tcp-Test $serverHost $port) { 'OK' } else { 'BAD' }))
     }
 
     $procs = @(Get-CimInstance Win32_Process -Filter "Name='$exeName'" -ErrorAction SilentlyContinue)
