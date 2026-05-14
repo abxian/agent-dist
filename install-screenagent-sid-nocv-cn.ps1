@@ -1,4 +1,4 @@
-﻿$ScriptFlavor = 'sid-nocv-cn-20260507-reuse-sid-autostart'
+$ScriptFlavor = 'sid-nocv-cn-20260507-reuse-sid-autostart'
 <#
 ScreenAgent SID 安装脚本 (国内源优先)
 

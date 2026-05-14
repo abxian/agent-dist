@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 ScreenAgent 安装 / 自动更新脚本 (国内源版本, 默认 -Source cn)
 用法:

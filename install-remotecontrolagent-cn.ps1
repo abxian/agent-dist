@@ -1,4 +1,4 @@
-﻿$ScriptFlavor = 'remotecontrol-cn-20260510-sid-autostart'
+$ScriptFlavor = 'remotecontrol-cn-20260510-sid-autostart'
 <#
 RemoteControlAgent SID 安装脚本 (国内源优先)
 

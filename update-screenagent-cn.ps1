@@ -1,4 +1,4 @@
-﻿$ScriptFlavor = 'update-screenagent-cn-20260507-auto-detect-run-sid'
+$ScriptFlavor = 'update-screenagent-cn-20260507-auto-detect-run-sid'
 <#
 ScreenAgent 自动更新 / 自动启动脚本 (国内源优先)
 
