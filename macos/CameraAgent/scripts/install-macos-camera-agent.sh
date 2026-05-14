@@ -48,6 +48,12 @@ if ! command -v swift >/dev/null 2>&1; then
   exit 1
 fi
 
+if [[ "$(id -u)" == "0" ]]; then
+  echo "Do not run this installer as root." >&2
+  echo "Run it from the normal logged-in macOS user so Camera permission and LaunchAgent are registered for that user." >&2
+  exit 1
+fi
+
 case "$SERVER_PORT" in
   ''|*[!0-9]*) echo "--port must be numeric" >&2; exit 2 ;;
 esac
