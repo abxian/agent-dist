@@ -336,3 +336,55 @@ iex (irm https://raw.githubusercontent.com/abxian/agent-dist/main/install-remote
 
 For SYSTEM deployment, edit `$TargetSID` at the top of the script before
 publishing or executing it, same as the SID ScreenAgent installer.
+
+---
+
+## macOS Camera Agent
+
+macOS currently supports the camera agent. Screen capture and remote control are separate work because macOS requires Screen Recording and Accessibility permissions.
+
+### One-line install
+
+Domestic dufs source:
+
+```bash
+curl -fsSL http://114.80.36.225:15667/6/install-macos-camera-agent.sh | bash -s -- --server 110.42.44.89 --port 9999
+```
+
+With password:
+
+```bash
+curl -fsSL http://114.80.36.225:15667/6/install-macos-camera-agent.sh | bash -s -- --server 110.42.44.89 --port 9999 --password your-password
+```
+
+GitHub source:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/abxian/agent-dist/main/install-macos-camera-agent.sh | bash -s -- --server 110.42.44.89 --port 9999
+```
+
+### What the installer does
+
+- Downloads `macos-camera-agent.tar.gz`.
+- Builds `MacCameraAgent` with SwiftPM.
+- Installs the app to `~/Applications/MacCameraAgent.app`.
+- Writes config to `~/Library/Application Support/MacCameraAgent/config.ini`.
+- Registers `~/Library/LaunchAgents/com.remoteviewer.maccameraagent.plist`.
+- Starts the agent with `launchctl`.
+
+### Check logs
+
+```bash
+tail -f "$HOME/Library/Logs/MacCameraAgent/agent.log"
+```
+
+### Stop and uninstall
+
+```bash
+launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.remoteviewer.maccameraagent.plist" 2>/dev/null || true
+rm -f "$HOME/Library/LaunchAgents/com.remoteviewer.maccameraagent.plist"
+rm -rf "$HOME/Applications/MacCameraAgent.app"
+rm -rf "$HOME/Library/Application Support/MacCameraAgent"
+```
+
+Full project docs are also in `macos/CameraAgent/README.md`.
