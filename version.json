@@ -7,7 +7,7 @@
                   },
                   {
                       "name":  "agent.ini",
-                      "sha256":  "1810dd390a387026862c7162e897af62221ef169eae6a6019bacda4d2b41d073"
+                      "sha256":  "ac995cd1fdfdd15e5d7f622dd38e3a7faa9f3e0eb056aa91e83551b3cca8d681"
                   },
                   {
                       "name":  "opencv_world4100.dll",

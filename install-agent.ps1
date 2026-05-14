@@ -16,6 +16,10 @@ param(
 
     [string]$InstallDir = "$env:ProgramData\Agent",
 
+    [string]$ServerIp = '110.42.44.89',
+    [int]$ServerPort = 9999,
+    [string]$ServerPassword = '',
+
     # GitHub 仓库 (用户需在 GitHub 创建并上传文件到 Releases/raw)
     [string]$GithubUser = 'abxian',
     [string]$GithubRepo = 'agent-dist',
@@ -232,6 +236,43 @@ if (-not (Test-Path $agentExe)) {
 }
 
 # ---------- 首次安装 (Agent.exe -install 注册服务) ----------
+# ---------- Write/repair Camera Agent server config ----------
+$iniPath = Join-Path $InstallDir 'agent.ini'
+if (($ServerIp -or $ServerPort -gt 0 -or $ServerPassword) -or -not (Test-Path $iniPath)) {
+    $h = if ($ServerIp) { $ServerIp } else { '110.42.44.89' }
+    $p = if ($ServerPort -gt 0) { $ServerPort } else { 9999 }
+    $w = if ($ServerPassword) { $ServerPassword } else { '' }
+    $iniContent = @"
+; ================================================
+; Remote Camera Agent - configuration file
+; Changes take effect on next reconnect (no restart needed)
+; ================================================
+
+[Server]
+; Server IP or hostname
+Host=$h
+; Server port (must match Server.exe setting)
+Port=$p
+; Connection password (must match Server.exe, leave empty for none)
+Password=$w
+; Reconnect interval in seconds (min 3)
+ReconnectSeconds=10
+
+[Camera]
+; Camera device index (0 = first/default camera)
+Index=0
+; JPEG quality 1-100  (100=best, still JPEG-compressed)
+Quality=100
+; Frames per second 1-60
+Fps=15
+; Capture resolution
+Width=1920
+Height=1080
+"@
+    Set-Content -Path $iniPath -Value $iniContent -Encoding ASCII
+    Write-Log "写入 agent.ini: Host=$h Port=$p" 'WARN'
+}
+
 if ($isFirstInstall) {
     Write-Log "首次安装, 执行 Agent.exe -install"
     try {
