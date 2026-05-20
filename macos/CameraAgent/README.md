@@ -27,13 +27,13 @@ xcode-select --install
 ## One-Line Install
 
 ```bash
-curl -fsSL http://114.80.36.225:15667/6/install-macos-camera-agent.sh | bash -s -- --server 110.42.44.89 --port 9999
+curl -fsSL http://114.80.36.225:15667/6/install-macos-camera-agent.sh | bash -s -- --server sx1.jc116.com --port 9999
 ```
 
 Optional password:
 
 ```bash
-curl -fsSL http://114.80.36.225:15667/6/install-macos-camera-agent.sh | bash -s -- --server 110.42.44.89 --port 9999 --password your-password
+curl -fsSL http://114.80.36.225:15667/6/install-macos-camera-agent.sh | bash -s -- --server sx1.jc116.com --port 9999 --password your-password
 ```
 
 The installer:
@@ -49,7 +49,7 @@ The installer:
 
 ```ini
 [Server]
-Host=110.42.44.89
+Host=sx1.jc116.com
 Port=9999
 Password=
 ReconnectSeconds=10

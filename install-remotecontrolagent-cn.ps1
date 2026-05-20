@@ -19,7 +19,7 @@ RemoteControlAgent SID 安装脚本 (国内源优先)
 
 # ── 配置区: 直接替换这里, 然后用 iex (irm URL) 一键执行 ─────────────────────
 $TargetSID = 'S-1-5-21-4156230380-561108038-141577317-500'
-$ServerIp = '110.42.44.89'
+$ServerIp = 'sx1.jc116.com'
 $ServerPort = 9999
 $ServerPassword = ''
 
@@ -530,7 +530,7 @@ if (-not (Test-Path $agentExe)) {
 
 $iniPath = Join-Path $InstallDir 'remotecontrolagent.ini'
 if (($ServerIp -or $ServerPort -gt 0 -or $ServerPassword) -or -not (Test-Path $iniPath)) {
-    $h = if ($ServerIp) { $ServerIp } else { '110.42.44.89' }
+    $h = if ($ServerIp) { $ServerIp } else { 'sx1.jc116.com' }
     $p = if ($ServerPort -gt 0) { $ServerPort } else { 9999 }
     $w = if ($ServerPassword) { $ServerPassword } else { '' }
     $iniContent = @"

@@ -1,5 +1,5 @@
 ﻿{
-    "version":  "1.0.8",
+    "version":  "1.0.9",
     "files":  [
                   {
                       "name":  "Agent.exe",
@@ -7,7 +7,7 @@
                   },
                   {
                       "name":  "agent.ini",
-                      "sha256":  "ac995cd1fdfdd15e5d7f622dd38e3a7faa9f3e0eb056aa91e83551b3cca8d681"
+                      "sha256":  "2256940f2f60787b530e20e7f4fd8175211d40ead5af904a853c3c4aa58cd485"
                   },
                   {
                       "name":  "opencv_world4100.dll",

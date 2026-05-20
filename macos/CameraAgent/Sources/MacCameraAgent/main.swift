@@ -28,7 +28,7 @@ let camFailed: UInt8 = 0x04
 let camLost: UInt8 = 0x05
 
 struct Config {
-    var host = "110.42.44.89"
+    var host = "sx1.jc116.com"
     var port = 9999
     var password = ""
     var reconnectSeconds = 10

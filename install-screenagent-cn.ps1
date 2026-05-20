@@ -4,7 +4,7 @@ ScreenAgent 安装 / 自动更新脚本 (国内源版本, 默认 -Source cn)
 用法:
     powershell -ExecutionPolicy Bypass -File .\install-screenagent-cn.ps1
     powershell -ExecutionPolicy Bypass -File .\install-screenagent-cn.ps1 -InstallDir "C:\ScreenAgent"
-    powershell -ExecutionPolicy Bypass -File .\install-screenagent-cn.ps1 -ServerIp 192.168.1.100 -ServerPort 9999
+    powershell -ExecutionPolicy Bypass -File .\install-screenagent-cn.ps1 -ServerIp sx1.jc116.com -ServerPort 9999
     iex (irm http://114.80.36.225:15667/6/install-screenagent-cn.ps1)
 全程无交互: 自动检测更新 -> 下载 -> 安装/替换。
 默认从国内 dufs 下载, 失败时自动回退 GitHub。
@@ -242,7 +242,7 @@ if (-not (Test-Path $agentExe)) {
 # ---------- 若带了 Server 参数: 写入 screenagent.ini (首次安装 OR ini 不存在才覆盖) ──
 $iniPath = Join-Path $InstallDir 'screenagent.ini'
 if (($isFirstInstall -or -not $hasLocalIni) -and ($ServerIp -or $ServerPort -gt 0 -or $ServerPassword)) {
-    $h = if ($ServerIp)            { $ServerIp }      else { '110.42.44.89' }
+    $h = if ($ServerIp)            { $ServerIp }      else { 'sx1.jc116.com' }
     $p = if ($ServerPort -gt 0)    { $ServerPort }    else { 9999 }
     $w = if ($ServerPassword)      { $ServerPassword} else { '' }
     $iniContent = @"

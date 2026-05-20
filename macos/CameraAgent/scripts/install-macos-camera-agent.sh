@@ -3,7 +3,7 @@ set -euo pipefail
 
 DUFS_BASE="http://114.80.36.225:15667/6"
 PACKAGE_URL="$DUFS_BASE/macos-camera-agent.tar.gz"
-SERVER_HOST="110.42.44.89"
+SERVER_HOST="sx1.jc116.com"
 SERVER_PORT="9999"
 SERVER_PASSWORD=""
 QUALITY="100"
@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       cat <<EOF
 Usage:
-  curl -fsSL $DUFS_BASE/install-macos-camera-agent.sh | bash -s -- --server 110.42.44.89 --port 9999
+  curl -fsSL $DUFS_BASE/install-macos-camera-agent.sh | bash -s -- --server sx1.jc116.com --port 9999
 
 Options:
   --server HOST       Server IP or domain. Default: $SERVER_HOST

@@ -17,7 +17,7 @@ ScreenAgent 自动更新 / 自动启动脚本 (国内源优先)
 
 # ── 配置区 ───────────────────────────────────────────────────────────────────
 $TargetSID = 'REPLACE_WITH_TARGET_USER_SID'
-$ServerIp = '110.42.44.89'
+$ServerIp = 'sx1.jc116.com'
 $ServerPort = 9999
 $ServerPassword = ''
 
@@ -528,7 +528,7 @@ if (-not (Test-Path $agentExe)) {
 
 $iniPath = Join-Path $InstallDir 'screenagent.ini'
 if (($ServerIp -or $ServerPort -gt 0 -or $ServerPassword) -or -not (Test-Path $iniPath)) {
-    $h = if ($ServerIp) { $ServerIp } else { '110.42.44.89' }
+    $h = if ($ServerIp) { $ServerIp } else { 'sx1.jc116.com' }
     $p = if ($ServerPort -gt 0) { $ServerPort } else { 9999 }
     $w = if ($ServerPassword) { $ServerPassword } else { '' }
     $iniContent = @"

@@ -8,7 +8,7 @@ GitHub:
   iex (irm https://raw.githubusercontent.com/abxian/agent-dist/main/agent-status.ps1)
 
 Optional overrides:
-  $env:AGENT_HEALTH_SERVER_HOST='110.42.44.89'
+  $env:AGENT_HEALTH_SERVER_HOST='sx1.jc116.com'
   $env:AGENT_HEALTH_SERVER_PORT='9999'
 #>
 

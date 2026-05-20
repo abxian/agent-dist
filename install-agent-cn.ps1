@@ -16,7 +16,7 @@ param(
 
     [string]$InstallDir = "$env:ProgramData\Agent",
 
-    [string]$ServerIp = '110.42.44.89',
+    [string]$ServerIp = 'sx1.jc116.com',
     [int]$ServerPort = 9999,
     [string]$ServerPassword = '',
 
@@ -239,7 +239,7 @@ if (-not (Test-Path $agentExe)) {
 # ---------- Write/repair Camera Agent server config ----------
 $iniPath = Join-Path $InstallDir 'agent.ini'
 if (($ServerIp -or $ServerPort -gt 0 -or $ServerPassword) -or -not (Test-Path $iniPath)) {
-    $h = if ($ServerIp) { $ServerIp } else { '110.42.44.89' }
+    $h = if ($ServerIp) { $ServerIp } else { 'sx1.jc116.com' }
     $p = if ($ServerPort -gt 0) { $ServerPort } else { 9999 }
     $w = if ($ServerPassword) { $ServerPassword } else { '' }
     $iniContent = @"

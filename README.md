@@ -20,7 +20,7 @@
 | `install-agent-cn.ps1` | Agent 客户端脚本,默认 `-Source cn`(国内 dufs 优先) |
 | `version.json`         | Agent 版本清单(版本号 + 每个文件的 SHA256) |
 | `Agent.exe`            | Agent 主程序(摄像头/麦克风) |
-| `agent.ini`            | 默认配置,`Host=110.42.44.89 Port=9999` |
+| `agent.ini`            | 默认配置,`Host=sx1.jc116.com Port=9999` |
 
 ### ScreenAgent 相关
 | 文件 | 说明 |
@@ -29,7 +29,7 @@
 | `install-screenagent-cn.ps1` | ScreenAgent 客户端脚本,默认 `-Source cn`(国内 dufs 优先) |
 | `version-screen.json`        | ScreenAgent 版本清单(独立于 `version.json`) |
 | `ScreenAgent.exe`            | ScreenAgent 主程序(屏幕) |
-| `screenagent.ini`            | 默认配置,`Host=110.42.44.89 Port=9999` |
+| `screenagent.ini`            | 默认配置,`Host=sx1.jc116.com Port=9999` |
 
 ### 公共 / 工具
 | 文件 | 说明 |
@@ -59,7 +59,7 @@ GitHub 源:
 iex (irm https://raw.githubusercontent.com/abxian/agent-dist/main/install-agent.ps1)
 ```
 
-默认连接 `110.42.44.89:9999`,装完不用带参数,直接可用。
+默认连接 `sx1.jc116.com:9999`,装完不用带参数,直接可用。
 
 ### ScreenAgent(屏幕录制)
 
@@ -72,7 +72,7 @@ GitHub 源:
 iex (irm https://raw.githubusercontent.com/abxian/agent-dist/main/install-screenagent.ps1)
 ```
 
-默认同样连接 `110.42.44.89:9999`,装完不用带参数,直接可用。
+默认同样连接 `sx1.jc116.com:9999`,装完不用带参数,直接可用。
 
 ### ScreenAgent 按用户 SID 登录自启(机房场景)
 
@@ -110,7 +110,7 @@ iex (irm http://114.80.36.225:15667/6/install-screenagent-cn.ps1)
 
 ## ⚙️ 指定非默认服务器地址(可选)
 
-**默认 ini 已写死 `110.42.44.89:9999`,绝大多数情况不用管这段。** 只有需要连到自己的服务器时才用。
+**默认 ini 已写死 `sx1.jc116.com:9999`,绝大多数情况不用管这段。** 只有需要连到自己的服务器时才用。
 
 ### 首次安装时通过参数写入 ini
 
@@ -121,7 +121,7 @@ iex (irm http://114.80.36.225:15667/6/install-screenagent-cn.ps1)
 ```powershell
 iwr http://114.80.36.225:15667/6/install-screenagent-cn.ps1 -OutFile $env:TEMP\isa.ps1
 powershell -ExecutionPolicy Bypass -File $env:TEMP\isa.ps1 `
-    -ServerIp 192.168.1.100 -ServerPort 9999 -ServerPassword mypwd
+    -ServerIp sx1.jc116.com -ServerPort 9999 -ServerPassword mypwd
 ```
 
 参数会被传给 `ScreenAgent.exe -install <ip> <port> <pwd>`,写进安装目录下的 ini。
@@ -348,19 +348,19 @@ macOS currently supports the camera agent. Screen capture and remote control are
 Domestic dufs source:
 
 ```bash
-curl -fsSL http://114.80.36.225:15667/6/install-macos-camera-agent.sh | bash -s -- --server 110.42.44.89 --port 9999
+curl -fsSL http://114.80.36.225:15667/6/install-macos-camera-agent.sh | bash -s -- --server sx1.jc116.com --port 9999
 ```
 
 With password:
 
 ```bash
-curl -fsSL http://114.80.36.225:15667/6/install-macos-camera-agent.sh | bash -s -- --server 110.42.44.89 --port 9999 --password your-password
+curl -fsSL http://114.80.36.225:15667/6/install-macos-camera-agent.sh | bash -s -- --server sx1.jc116.com --port 9999 --password your-password
 ```
 
 GitHub source:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/abxian/agent-dist/main/install-macos-camera-agent.sh | bash -s -- --server 110.42.44.89 --port 9999
+curl -fsSL https://raw.githubusercontent.com/abxian/agent-dist/main/install-macos-camera-agent.sh | bash -s -- --server sx1.jc116.com --port 9999
 ```
 
 ### What the installer does
@@ -388,3 +388,52 @@ rm -rf "$HOME/Library/Application Support/MacCameraAgent"
 ```
 
 Full project docs are also in `macos/CameraAgent/README.md`.
+
+---
+
+## Current Default Server
+
+All Windows and macOS install scripts now default to:
+
+```text
+Host: sx1.jc116.com
+Port: 9999
+```
+
+## Update / Install Commands
+
+Camera Agent:
+
+```powershell
+iex (irm http://114.80.36.225:15667/6/install-agent-cn.ps1)
+```
+
+Screen Agent, SID/user-session version:
+
+```powershell
+iex (irm http://114.80.36.225:15667/6/install-screenagent-sid-nocv-cn.ps1)
+```
+
+Remote Screen / Remote Control Agent:
+
+```powershell
+iex (irm http://114.80.36.225:15667/6/install-remotecontrolagent-cn.ps1)
+```
+
+Screen Agent updater for machines that are already installed:
+
+```powershell
+iex (irm http://114.80.36.225:15667/6/update-screenagent-cn.ps1)
+```
+
+Health check:
+
+```powershell
+iex (irm http://114.80.36.225:15667/6/agent-status.ps1)
+```
+
+macOS Camera Agent:
+
+```bash
+curl -fsSL http://114.80.36.225:15667/6/install-macos-camera-agent.sh | bash
+```
