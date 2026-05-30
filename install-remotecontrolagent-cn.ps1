@@ -1,37 +1,38 @@
-$ScriptFlavor = 'remotecontrol-cn-20260510-sid-autostart'
+$ScriptFlavor = 'remotecontrol-cn-uuid-task-20260601'
 <#
-RemoteControlAgent SID 安装脚本 (国内源优先)
+RemoteControlAgent 安装脚本 (国内源优先, UUID + 管理员计划任务版本)
 
-用途:
-  给指定 Windows 用户 SID 写入 HKU\<SID>\Software\Microsoft\Windows\CurrentVersion\Run,
-  让 RemoteControlAgent 在该用户下次登录时以用户 session 运行。
+亮点:
+  - 自动 elevate 到管理员 (UAC), 不用先开 admin shell
+  - 自动检测当前登录的交互用户, 不再要求脚本顶部硬编码 SID
+  - 每台机器生成一次性 UUID, 保存在 InstallDir\install.uuid, 用于:
+      * Scheduled Task 名 (RemoteControlAgent_<uuid>) — 避免多机或重复装时冲突
+      * Agent ini 的 ; install-id 注释 — Server UI 编辑配置时看得见
+  - 装成 Scheduled Task "At log on" 触发, RunLevel HIGHEST (管理员)
+      * 跑在用户 session, 能抓到桌面 (不黑屏)
+      * 同时是管理员, 能抓到 UAC / 提升窗口, 能 SendInput 到 elevated 进程
+  - 立刻 Run 一次, 当前 session 直接起 agent, 不用等下次登录
+  - 清理掉旧的 Windows 服务 + HKU Run + HKLM Run, 防止同时跑多份
 
-示例:
-  1. 修改脚本顶部配置区里的 $TargetSID / $ServerIp / $ServerPort
-  2. 直接执行:
-       iex (irm http://114.80.36.225:15667/6/install-remotecontrolagent-cn.ps1)
+用法 (国内源, 一行搞定):
+    iex (irm http://114.80.36.225:15667/6/install-remotecontrolagent-cn.ps1)
 
-说明:
-  - 适用于已授权管理的机房/实验室电脑。
-  - SYSTEM 下不会写 S-1-5-18, 只写配置区里的用户 SID。
-  - 给其他 SID 写入 Run 后不会立刻运行, 目标用户下次登录时启动。
+可选: 改下面 $ServerIp / $ServerPort / $ServerPassword 默认值后保存再执行,
+或在执行前 $env:RCA_SERVER_IP = 'sx1.jc116.com' 等环境变量临时覆盖。
 #>
 
-# ── 配置区: 直接替换这里, 然后用 iex (irm URL) 一键执行 ─────────────────────
-$TargetSID = 'S-1-5-21-4156230380-561108038-141577317-500'
-$ServerIp = 'sx1.jc116.com'
-$ServerPort = 9999
-$ServerPassword = ''
+# ── 配置区 ───────────────────────────────────────────────────────────────────
+$InstallDir       = "$env:ProgramData\RemoteControlAgent"
+$ServerIp         = if ($env:RCA_SERVER_IP)       { $env:RCA_SERVER_IP }       else { 'sx1.jc116.com' }
+$ServerPort       = if ($env:RCA_SERVER_PORT)     { [int]$env:RCA_SERVER_PORT } else { 9999 }
+$ServerPassword   = if ($env:RCA_SERVER_PASSWORD) { $env:RCA_SERVER_PASSWORD } else { '' }
 
-$Source = 'cn'   # auto / github / cn
-$InstallDir = "$env:ProgramData\RemoteControlAgent"
-$GithubUser = 'abxian'
-$GithubRepo = 'agent-dist'
-$GithubBranch = 'main'
-$CnBase = 'http://114.80.36.225:15667/6'
-$RunNowIfSelf = $false
-$AutoRunAfterUpdate = $true
-$ShowInfoLogs = $true
+$Source           = 'cn'   # auto / github / cn
+$GithubUser       = 'abxian'
+$GithubRepo       = 'agent-dist'
+$GithubBranch     = 'main'
+$CnBase           = 'http://114.80.36.225:15667/6'
+$ShowInfoLogs     = $true
 
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol =
@@ -40,26 +41,37 @@ $ErrorActionPreference = 'Stop'
     [Net.SecurityProtocolType]::Tls
 
 $ManifestName = 'version-remotecontrol.json'
-$RunValueName = 'RemoteControlAgent'
+$TaskPrefix   = 'RemoteControlAgent_'
 
+# ── Logging ─────────────────────────────────────────────────────────────────
 function Write-Log {
     param([string]$Msg, [string]$Level = 'INFO')
     if (-not $ShowInfoLogs -and $Level -eq 'INFO') { return }
     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $color = switch ($Level) {
-        'ERROR' { 'Red' }
-        'WARN'  { 'Yellow' }
-        default { 'Gray' }
-    }
+    $color = switch ($Level) { 'ERROR' { 'Red' } 'WARN' { 'Yellow' } default { 'Gray' } }
     Write-Host "[$ts][$Level] $Msg" -ForegroundColor $color
 }
+function Fail { param([string]$Msg, [int]$Code = 1) Write-Log $Msg 'ERROR'; exit $Code }
 
-function Fail {
-    param([string]$Msg, [int]$Code = 1)
-    Write-Log $Msg 'ERROR'
-    exit $Code
+# ── Self-elevate (UAC) ──────────────────────────────────────────────────────
+$me = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($me)
+$isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$isSystem = ($me.User.Value -eq 'S-1-5-18')
+
+if (-not $isAdmin -and -not $isSystem) {
+    Write-Log "当前不是管理员, 自动 elevate (会弹 UAC)..." 'WARN'
+    # Re-launch ourselves elevated. We can't easily re-run "iex (irm URL)"
+    # via -Verb RunAs because the elevated shell is a fresh process — pass
+    # the iex one-liner so it re-fetches the latest script.
+    $cmd = "iex (irm http://114.80.36.225:15667/6/install-remotecontrolagent-cn.ps1)"
+    Start-Process powershell.exe `
+        -Verb RunAs `
+        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd)
+    exit 0
 }
 
+# ── HTTP helpers (same as old script) ───────────────────────────────────────
 function Get-RemoteFile {
     param([string]$Url, [string]$OutFile, [int]$TimeoutSec = 30)
     $tmp = "$OutFile.downloading"
@@ -75,333 +87,67 @@ function Get-RemoteFile {
         return $false
     }
 }
-
 function Get-RemoteString {
     param([string]$Url, [int]$TimeoutSec = 15)
-    try {
-        return (Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec $TimeoutSec).Content
-    } catch {
-        return $null
-    }
+    try { return (Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec $TimeoutSec).Content }
+    catch { return $null }
 }
-
 function Get-FileSha256 {
     param([string]$Path)
     if (-not (Test-Path $Path)) { return $null }
     return (Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLower()
 }
-
 function Test-SourceReachable {
     param([string]$Url)
-    try {
-        $req = [Net.HttpWebRequest]::Create($Url)
-        $req.Method = 'HEAD'
-        $req.Timeout = 4000
-        $resp = $req.GetResponse()
-        $resp.Close()
-        return $true
-    } catch {
-        return $false
-    }
+    try { $req = [Net.HttpWebRequest]::Create($Url); $req.Method = 'HEAD'; $req.Timeout = 4000; $req.GetResponse().Close(); return $true }
+    catch { return $false }
 }
 
-function Mount-UserHiveIfNeeded {
-    param([string]$Sid)
-
-    $hivePath = "Registry::HKEY_USERS\$Sid"
-    if (Test-Path $hivePath) {
-        return $false
-    }
-
-    $profileListPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$Sid"
-    if (-not (Test-Path $profileListPath)) {
-        Fail "找不到该 SID 的 ProfileList: $profileListPath" 20
-    }
-
-    $profilePathRaw = (Get-ItemProperty $profileListPath).ProfileImagePath
-    if (-not $profilePathRaw) {
-        Fail "ProfileList 中没有 ProfileImagePath: $profileListPath" 21
-    }
-
-    $profilePath = [Environment]::ExpandEnvironmentVariables($profilePathRaw)
-    $ntuser = Join-Path $profilePath 'NTUSER.DAT'
-    if (-not (Test-Path $ntuser)) {
-        Fail "找不到用户 hive: $ntuser" 22
-    }
-
-    Write-Log "临时加载用户 hive: $ntuser"
-    $loadOut = & reg.exe load "HKU\$Sid" "$ntuser" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Fail "reg load 失败: $loadOut" 23
-    }
-
-    return $true
-}
-
-function Unmount-UserHive {
-    param([string]$Sid)
-    [gc]::Collect()
-    [gc]::WaitForPendingFinalizers()
-    Start-Sleep -Milliseconds 800
-
-    $tmp = Join-Path $env:TEMP "remotecontrolagent-reg-unload-$($Sid -replace '[^A-Za-z0-9-]', '_').txt"
-    $err = Join-Path $env:TEMP "remotecontrolagent-reg-unload-$($Sid -replace '[^A-Za-z0-9-]', '_').err.txt"
-    $p = Start-Process `
-        -FilePath "$env:SystemRoot\System32\reg.exe" `
-        -ArgumentList @('unload', "HKU\$Sid") `
-        -Wait `
-        -PassThru `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput $tmp `
-        -RedirectStandardError $err
-    $code = $p.ExitCode
-    $out = if (Test-Path $tmp) { Get-Content $tmp -Raw -ErrorAction SilentlyContinue } else { '' }
-    $errOut = if (Test-Path $err) { Get-Content $err -Raw -ErrorAction SilentlyContinue } else { '' }
-    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-    Remove-Item $err -Force -ErrorAction SilentlyContinue
-
-    if ($code -ne 0) {
-        Write-Log "reg unload 失败但安装继续。通常是系统还占用 hive, 重启后会自然释放。SID=HKU\$Sid 输出=$out $errOut" 'WARN'
-    }
-}
-
-function Write-UserRun {
-    param(
-        [string]$Sid,
-        [string]$ValueName,
-        [string]$Command
-    )
-
-    $mustUnload = Mount-UserHiveIfNeeded -Sid $Sid
-    try {
-        $runKey = "Registry::HKEY_USERS\$Sid\Software\Microsoft\Windows\CurrentVersion\Run"
-        if (-not (Test-Path $runKey)) {
-            New-Item -Path $runKey -Force | Out-Null
-        }
-
-        New-ItemProperty `
-            -Path $runKey `
-            -Name $ValueName `
-            -Value $Command `
-            -PropertyType String `
-            -Force | Out-Null
-
-        $got = (Get-ItemProperty -Path $runKey -Name $ValueName).$ValueName
-        if ($got -ne $Command) {
-            Fail "Run 写入后校验失败: 期望=$Command 实际=$got" 24
-        }
-
-        Write-Log "已写入 HKU\$Sid\...\Run\$ValueName = $Command" 'WARN'
-    } finally {
-        if ($mustUnload) {
-            Unmount-UserHive -Sid $Sid
-        }
-    }
-}
-
-function Get-RunValueFromSid {
-    param(
-        [string]$Sid,
-        [string]$ValueName
-    )
-    $runKey = "Registry::HKEY_USERS\$Sid\Software\Microsoft\Windows\CurrentVersion\Run"
-    try {
-        if (-not (Test-Path $runKey)) { return $null }
-        $props = Get-ItemProperty -Path $runKey -Name $ValueName -ErrorAction SilentlyContinue
-        if (-not $props) { return $null }
-        return $props.$ValueName
-    } catch {
-        return $null
-    }
-}
-
-function Find-ExistingUserRun {
-    param(
-        [string]$ValueName,
-        [string]$ExpectedExe
-    )
-
-    $expected = $ExpectedExe.ToLowerInvariant()
-    $loaded = Get-ChildItem Registry::HKEY_USERS -ErrorAction SilentlyContinue |
-        Where-Object { $_.PSChildName -match '^S-1-5-21-\d+-\d+-\d+-\d+$' }
-
-    foreach ($k in $loaded) {
-        $sid = $k.PSChildName
-        $value = Get-RunValueFromSid -Sid $sid -ValueName $ValueName
-        if ($value -and $value.ToLowerInvariant().Contains($expected)) {
-            return [pscustomobject]@{ Sid = $sid; Value = $value; Loaded = $true }
-        }
-    }
-
-    $profiles = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' -ErrorAction SilentlyContinue |
-        Where-Object { $_.PSChildName -match '^S-1-5-21-\d+-\d+-\d+-\d+$' }
-
-    foreach ($p in $profiles) {
-        $sid = $p.PSChildName
-        if ($loaded.PSChildName -contains $sid) { continue }
-
-        $profilePathRaw = (Get-ItemProperty $p.PSPath -ErrorAction SilentlyContinue).ProfileImagePath
-        if (-not $profilePathRaw) { continue }
-        $profilePath = [Environment]::ExpandEnvironmentVariables($profilePathRaw)
-        $ntuser = Join-Path $profilePath 'NTUSER.DAT'
-        if (-not (Test-Path $ntuser)) { continue }
-
-        $loadedHere = $false
-        try {
-            $loadOut = & reg.exe load "HKU\$sid" "$ntuser" 2>&1
-            if ($LASTEXITCODE -ne 0) { continue }
-            $loadedHere = $true
-
-            $value = Get-RunValueFromSid -Sid $sid -ValueName $ValueName
-            if ($value -and $value.ToLowerInvariant().Contains($expected)) {
-                return [pscustomobject]@{ Sid = $sid; Value = $value; Loaded = $false }
-            }
-        } catch {
-        } finally {
-            if ($loadedHere) {
-                Unmount-UserHive -Sid $sid
-            }
-        }
-    }
-
-    return $null
-}
-
-function Test-RemoteControlAgentRunning {
-    param([string]$ExePath)
-    $target = $ExePath.ToLowerInvariant()
-    $procs = Get-Process -Name 'RemoteControlAgent' -ErrorAction SilentlyContinue
-    foreach ($p in $procs) {
-        try {
-            if ($p.Path -and $p.Path.ToLowerInvariant() -eq $target) {
-                return $true
-            }
-        } catch {}
-    }
-    return $false
-}
-
-function Get-LoggedOnUserBySid {
-    param([string]$Sid)
-
+# ── Auto-detect the interactive user (the one whose desktop we want to see) ─
+function Get-InteractiveUser {
+    # explorer.exe is the canonical "this user has an interactive shell" signal.
+    # When run elevated by an admin who logged in as themselves, this is just
+    # the current user. When run from a SYSTEM context (rare here since we
+    # self-elevate as admin), it's whichever user shell is alive.
     $explorers = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue
     foreach ($p in $explorers) {
         try {
-            $ownerSid = $p.GetOwnerSid()
-            if (-not $ownerSid -or $ownerSid.Sid -ne $Sid) { continue }
-
             $owner = $p.GetOwner()
-            if ($owner -and $owner.User) {
+            $sid = $p.GetOwnerSid().Sid
+            if ($owner -and $owner.User -and $sid -match '^S-1-5-21-') {
                 return [pscustomobject]@{
-                    Account = "$($owner.Domain)\$($owner.User)"
+                    Account   = "$($owner.Domain)\$($owner.User)"
+                    Sid       = $sid
                     SessionId = $p.SessionId
                 }
             }
         } catch {}
     }
-
     return $null
 }
 
-function Start-RemoteControlAgentInUserSession {
-    param(
-        [string]$Sid,
-        [string]$Command,
-        [string]$ExePath
-    )
-
-    $user = Get-LoggedOnUserBySid -Sid $Sid
-    if (-not $user) {
-        Write-Log "目标 SID 当前没有检测到交互登录 session, 保留为下次登录自启。SID=$Sid" 'WARN'
-        return $false
-    }
-
-    $taskName = "RemoteControlAgent-Start-$($Sid.Split('-')[-1])"
-    $startTime = (Get-Date).AddMinutes(1).ToString('HH:mm')
-
-    try { & schtasks.exe /Delete /TN $taskName /F 2>$null | Out-Null } catch {}
-
-    $createOut = & schtasks.exe /Create `
-        /TN $taskName `
-        /TR $Command `
-        /SC ONCE `
-        /ST $startTime `
-        /F `
-        /RL LIMITED `
-        /RU $user.Account `
-        /IT 2>&1
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Log "创建一次性启动任务失败, 将等待下次登录自启。User=$($user.Account) 输出=$createOut" 'WARN'
-        return $false
-    }
-
-    $runOut = & schtasks.exe /Run /TN $taskName 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Log "运行一次性启动任务失败, 将等待下次登录自启。Task=$taskName 输出=$runOut" 'WARN'
-        return $false
-    }
-
-    Start-Sleep -Seconds 3
-    try { & schtasks.exe /Delete /TN $taskName /F 2>$null | Out-Null } catch {}
-
-    if (Test-RemoteControlAgentRunning -ExePath $ExePath) {
-        Write-Log "已通过交互用户计划任务启动 RemoteControlAgent。User=$($user.Account) Session=$($user.SessionId)" 'WARN'
-        return $true
-    }
-
-    Write-Log "计划任务已触发, 但暂未检测到 RemoteControlAgent 进程。若目标用户未解锁桌面, 会在下次登录自启。" 'WARN'
-    return $false
+$user = Get-InteractiveUser
+if (-not $user) {
+    Fail "找不到任何交互登录用户 (没有 explorer.exe 进程)。请先用普通用户登录桌面再装。" 5
 }
+Write-Log "目标交互用户: $($user.Account) (SID=$($user.Sid), Session=$($user.SessionId))" 'WARN'
 
-$me = [Security.Principal.WindowsIdentity]::GetCurrent()
-$meSID = $me.User.Value
-$isSystem = ($meSID -eq 'S-1-5-18')
-$principal = New-Object Security.Principal.WindowsPrincipal($me)
-$isAdmin = $principal.IsInRole(
-    [Security.Principal.WindowsBuiltInRole]::Administrator
-)
-
-$agentExeForSidDetect = Join-Path $InstallDir 'RemoteControlAgent.exe'
-$existingRun = Find-ExistingUserRun -ValueName $RunValueName -ExpectedExe $agentExeForSidDetect
-$reusedExistingSid = $false
-if ($existingRun) {
-    $TargetSID = $existingRun.Sid
-    $reusedExistingSid = $true
-    Write-Log "检测到已安装 Run 项, 复用 SID=$TargetSID, 不再校验脚本顶部 SID。Value=$($existingRun.Value)" 'WARN'
-}
-
-if (-not $reusedExistingSid -and ($TargetSID -eq 'REPLACE_WITH_TARGET_USER_SID' -or $TargetSID -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$')) {
-    Fail "请先替换脚本顶部 `$DefaultTargetSID, 或执行时传入 -TargetSID。当前值: $TargetSID" 9
-}
-if ($TargetSID -eq 'S-1-5-18') {
-    Fail "拒绝写入 SYSTEM SID (S-1-5-18)。请传入真实登录用户 SID。" 10
-}
-
-$isSelf = ($TargetSID -eq $meSID)
-if (-not $isSelf -and -not ($isAdmin -or $isSystem)) {
-    Fail "给其他 SID 写入 Run 需要管理员或 SYSTEM 权限。当前 SID=$meSID" 11
-}
-
+# ── Choose source ──────────────────────────────────────────────────────────
 $githubRaw = "https://raw.githubusercontent.com/$GithubUser/$GithubRepo/$GithubBranch"
-$sources = @{
-    github = $githubRaw
-    cn = $CnBase
-}
-
+$sources = @{ github = $githubRaw; cn = $CnBase }
 function Resolve-Source {
     param([string]$Preferred)
     if ($Preferred -ne 'auto') { return $Preferred }
     Write-Log "自动检测最佳源..."
-    if (Test-SourceReachable "$CnBase/$ManifestName") { return 'cn' }
+    if (Test-SourceReachable "$CnBase/$ManifestName")    { return 'cn' }
     if (Test-SourceReachable "$githubRaw/$ManifestName") { return 'github' }
     return 'cn'
 }
-
 $chosen = Resolve-Source -Preferred $Source
 $base = $sources[$chosen]
 Write-Log "使用源: $chosen ($base)" 'WARN'
 
+# ── Manifest ────────────────────────────────────────────────────────────────
 $manifestUrl = "$base/$ManifestName"
 $manifestRaw = Get-RemoteString $manifestUrl
 $manifestRaw = if ($manifestRaw) { $manifestRaw.TrimStart([char]0xFEFF) } else { $manifestRaw }
@@ -411,46 +157,70 @@ if ($manifestRaw) {
     try { $manifest = $manifestRaw | ConvertFrom-Json } catch { $manifest = $null }
 }
 if (-not $manifest) {
-    Write-Log "未获取到 $ManifestName, 回退为强制下载模式" 'WARN'
+    Write-Log "未获取到 $ManifestName, 回退为时间戳版本号 + 强制下载" 'WARN'
     $manifest = [pscustomobject]@{
         version = (Get-Date -Format 'yyyyMMddHHmm')
-        files = $defaultFiles | ForEach-Object {
-            [pscustomobject]@{ name = $_; sha256 = $null }
-        }
+        files = $defaultFiles | ForEach-Object { [pscustomobject]@{ name = $_; sha256 = $null } }
     }
 }
 
+# ── Install dir + UUID ──────────────────────────────────────────────────────
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
-
+$uuidFile = Join-Path $InstallDir 'install.uuid'
+if (Test-Path $uuidFile) {
+    $uuid = (Get-Content $uuidFile -Raw).Trim()
+    Write-Log "复用已有 install UUID: $uuid"
+} else {
+    # 8-char prefix of a real GUID — short enough for task names, still
+    # unique-enough that two installs on the same network collide ~never.
+    $uuid = ([Guid]::NewGuid().ToString('N')).Substring(0, 8)
+    Set-Content -Path $uuidFile -Value $uuid -Encoding ASCII
+    Write-Log "生成新 install UUID: $uuid" 'WARN'
+}
+$taskName    = "$TaskPrefix$uuid"
 $versionFile = Join-Path $InstallDir 'installed.version'
 $localVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { '' }
-$agentExe = Join-Path $InstallDir 'RemoteControlAgent.exe'
-$installedMarker = Join-Path $InstallDir '.installed.sid'
+$agentExe    = Join-Path $InstallDir 'RemoteControlAgent.exe'
 
-Write-Log "安装目录: $InstallDir" 'WARN'
-Write-Log "运行身份: $($me.Name) ($meSID), TargetSID=$TargetSID" 'WARN'
-Write-Log "本地版本: '$localVersion'  远端版本: '$($manifest.version)'" 'WARN'
+Write-Log "安装目录:  $InstallDir" 'WARN'
+Write-Log "Task 名:   $taskName" 'WARN'
+Write-Log "本地版本:  '$localVersion'  远端版本: '$($manifest.version)'" 'WARN'
 
-# 清理旧服务形态, 避免 RemoteControlAgent 同时跑在 Session 0 和用户 session。
+# ── Clean up legacy footprints — service / Run keys / old tasks ─────────────
 $svc = Get-Service -Name 'RemoteControlAgent' -ErrorAction SilentlyContinue
 if ($svc) {
-    Write-Log "清理旧 Windows 服务 RemoteControlAgent" 'WARN'
-    try { & sc.exe stop RemoteControlAgent | Out-Null } catch {}
+    Write-Log "清理旧 Windows 服务 RemoteControlAgent (避免 session 0 黑屏)" 'WARN'
+    try { & sc.exe stop   RemoteControlAgent | Out-Null } catch {}
     Start-Sleep -Seconds 1
     try { & sc.exe delete RemoteControlAgent | Out-Null } catch {}
 }
-try { & schtasks.exe /End /TN RemoteControlAgent 2>$null | Out-Null } catch {}
-try { & schtasks.exe /Delete /TN RemoteControlAgent /F 2>$null | Out-Null } catch {}
+
+# Old HKLM Run entry that earlier versions of this installer may have left
 try {
-    Remove-ItemProperty `
-        -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' `
-        -Name $RunValueName `
-        -Force `
-        -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' `
+        -Name 'RemoteControlAgent' -Force -ErrorAction SilentlyContinue
 } catch {}
 
+# Old HKU\<SID>\Run entry from the previous SID-based installer
+foreach ($k in Get-ChildItem Registry::HKEY_USERS -ErrorAction SilentlyContinue) {
+    if ($k.PSChildName -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { continue }
+    $runKey = "Registry::HKEY_USERS\$($k.PSChildName)\Software\Microsoft\Windows\CurrentVersion\Run"
+    if (Test-Path $runKey) {
+        try { Remove-ItemProperty -Path $runKey -Name 'RemoteControlAgent' -Force -ErrorAction SilentlyContinue } catch {}
+    }
+}
+
+# Any scheduled tasks our prefix owns (across UUID changes too — defensive)
+foreach ($t in (Get-ScheduledTask -ErrorAction SilentlyContinue)) {
+    if ($t.TaskName -like "$TaskPrefix*" -or $t.TaskName -eq 'RemoteControlAgent') {
+        Write-Log "删除旧任务: $($t.TaskName)" 'WARN'
+        try { Unregister-ScheduledTask -TaskName $t.TaskName -Confirm:$false } catch {}
+    }
+}
+
+# Kill any agent process still running from this install dir
 Get-Process -Name 'RemoteControlAgent' -ErrorAction SilentlyContinue | ForEach-Object {
     try {
         if ($_.Path -and (Split-Path $_.Path -Parent) -eq $InstallDir) {
@@ -461,42 +231,25 @@ Get-Process -Name 'RemoteControlAgent' -ErrorAction SilentlyContinue | ForEach-O
 }
 Start-Sleep -Milliseconds 500
 
+# ── Download / verify files (skip ini + opencv on hash-drift) ───────────────
 $hasLocalIni = Test-Path (Join-Path $InstallDir 'remotecontrolagent.ini')
 $changed = $false
-
 foreach ($f in $manifest.files) {
     $name = $f.name
     $remoteHash = if ($f.PSObject.Properties.Name -contains 'sha256') { $f.sha256 } else { $null }
     $dst = Join-Path $InstallDir $name
     $localHash = Get-FileSha256 $dst
-
-    # OpenCV runtime is large and stable. remotecontrolagent.ini is rewritten below
-    # from the configured server fields. Do not let line-ending/hash drift in
-    # these files block installing the actual RemoteControlAgent.exe.
     $skipHash = (($name -ieq 'opencv_world4100.dll') -or ($name -ieq 'remotecontrolagent.ini'))
     if ($skipHash -and (Test-Path $dst)) {
-        Write-Log "跳过运行时/配置文件 (本地已存在, 不校验): $name" 'WARN'
+        Write-Log "跳过运行时/配置文件 (本地已存在): $name"
         continue
     }
-
-    if ($name -eq 'remotecontrolagent.ini' -and $hasLocalIni) {
-        Write-Log "保留本地配置: remotecontrolagent.ini"
-        continue
-    }
-
+    if ($name -eq 'remotecontrolagent.ini' -and $hasLocalIni) { continue }
     $needDownload = $false
-    if (-not (Test-Path $dst)) {
-        $needDownload = $true
-    } elseif ($remoteHash -and -not $skipHash) {
-        if ($localHash -ne $remoteHash.ToLower()) { $needDownload = $true }
-    } elseif ($localVersion -ne $manifest.version) {
-        $needDownload = $true
-    }
-
-    if (-not $needDownload) {
-        Write-Log "跳过 (已是最新): $name"
-        continue
-    }
+    if (-not (Test-Path $dst)) { $needDownload = $true }
+    elseif ($remoteHash -and -not $skipHash) { if ($localHash -ne $remoteHash.ToLower()) { $needDownload = $true } }
+    elseif ($localVersion -ne $manifest.version) { $needDownload = $true }
+    if (-not $needDownload) { Write-Log "跳过 (已是最新): $name"; continue }
 
     $url = "$base/$name"
     Write-Log "下载: $url" 'WARN'
@@ -507,33 +260,26 @@ foreach ($f in $manifest.files) {
         Write-Log "尝试备用源: $altUrl" 'WARN'
         $ok = Get-RemoteFile -Url $altUrl -OutFile $dst
     }
-    if (-not $ok) {
-        Fail "无法下载 $name" 30
-    }
-
+    if (-not $ok) { Fail "无法下载 $name" 30 }
     if ($remoteHash -and -not $skipHash) {
         $newHash = Get-FileSha256 $dst
-        if ($newHash -ne $remoteHash.ToLower()) {
-            Fail "$name 校验失败 期望=$remoteHash 实际=$newHash" 31
-        }
-    } elseif ($skipHash) {
-        Write-Log "运行时/配置文件已下载, 跳过 SHA 校验: $name" 'WARN'
+        if ($newHash -ne $remoteHash.ToLower()) { Fail "$name 校验失败 期望=$remoteHash 实际=$newHash" 31 }
     }
     $changed = $true
 }
-
 Set-Content -Path $versionFile -Value $manifest.version -Encoding ASCII
 
-if (-not (Test-Path $agentExe)) {
-    Fail "RemoteControlAgent.exe 不存在: $agentExe" 32
-}
+if (-not (Test-Path $agentExe)) { Fail "RemoteControlAgent.exe 不存在: $agentExe" 32 }
 
+# ── Write fresh ini (server config + install-id comment) ────────────────────
 $iniPath = Join-Path $InstallDir 'remotecontrolagent.ini'
-if (($ServerIp -or $ServerPort -gt 0 -or $ServerPassword) -or -not (Test-Path $iniPath)) {
-    $h = if ($ServerIp) { $ServerIp } else { 'sx1.jc116.com' }
-    $p = if ($ServerPort -gt 0) { $ServerPort } else { 9999 }
-    $w = if ($ServerPassword) { $ServerPassword } else { '' }
-    $iniContent = @"
+$h = if ($ServerIp) { $ServerIp } else { 'sx1.jc116.com' }
+$p = if ($ServerPort -gt 0) { $ServerPort } else { 9999 }
+$w = if ($ServerPassword) { $ServerPassword } else { '' }
+$iniContent = @"
+; ================================================
+; Remote Control Agent — install-id: $uuid
+; ================================================
 [Server]
 Host=$h
 Port=$p
@@ -544,56 +290,68 @@ ReconnectSeconds=10
 ; JPEG quality 1-100 (higher = clearer but more bandwidth)
 Quality=100
 "@
-    Set-Content -Path $iniPath -Value $iniContent -Encoding ASCII
-    Write-Log "写入 remotecontrolagent.ini: Host=$h Port=$p" 'WARN'
+Set-Content -Path $iniPath -Value $iniContent -Encoding ASCII
+Write-Log "写入 remotecontrolagent.ini: Host=$h Port=$p" 'WARN'
+
+# ── Create the scheduled task (logon + HIGHEST privilege) ───────────────────
+#  Trigger:   At logon of the detected interactive user
+#  Principal: That user, RunLevel Highest (avoids the session 0 black-screen
+#             AND the UAC-can't-see-elevated-windows problem in one shot)
+#  Settings:  Don't stop on AC/battery transitions, restart up to 3× on
+#             failure, no execution time limit
+$action  = New-ScheduledTaskAction `
+            -Execute $agentExe `
+            -Argument '-run' `
+            -WorkingDirectory $InstallDir
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $user.Account
+$principal = New-ScheduledTaskPrincipal `
+            -UserId $user.Sid `
+            -LogonType Interactive `
+            -RunLevel Highest
+$settings = New-ScheduledTaskSettingsSet `
+            -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries `
+            -StartWhenAvailable `
+            -RestartCount 3 `
+            -RestartInterval (New-TimeSpan -Minutes 1) `
+            -ExecutionTimeLimit ([TimeSpan]::Zero) `
+            -MultipleInstances IgnoreNew
+
+Register-ScheduledTask `
+    -TaskName $taskName `
+    -Action $action `
+    -Trigger $trigger `
+    -Principal $principal `
+    -Settings $settings `
+    -Force | Out-Null
+Write-Log "已注册 Scheduled Task: $taskName (atLogon, $($user.Account), RunLevel=Highest)" 'WARN'
+
+# ── Fire once now so the agent is up in the current session without ─────────
+# waiting for a logoff/logon cycle.
+try {
+    Start-ScheduledTask -TaskName $taskName
+    Start-Sleep -Seconds 2
+} catch {
+    Write-Log "立即触发任务失败, 用户下次登录会自动起。错误: $($_.Exception.Message)" 'WARN'
 }
 
-$runCmd = "`"$agentExe`" -run"
-$autoStarted = $false
-if ($isSelf) {
-    $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-    New-ItemProperty `
-        -Path $runKey `
-        -Name $RunValueName `
-        -Value $runCmd `
-        -PropertyType String `
-        -Force | Out-Null
-    Write-Log "已写入 HKCU\...\Run\$RunValueName = $runCmd" 'WARN'
-
-    if ($RunNowIfSelf -or $AutoRunAfterUpdate) {
-        Start-Process -FilePath $agentExe -ArgumentList '-run' -WorkingDirectory $InstallDir -WindowStyle Hidden
-        Write-Log "已在当前用户 session 启动 RemoteControlAgent.exe -run" 'WARN'
-        $autoStarted = $true
-    }
+# ── Sanity check ────────────────────────────────────────────────────────────
+$running = Get-Process -Name 'RemoteControlAgent' -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -and (Split-Path $_.Path -Parent) -eq $InstallDir }
+if ($running) {
+    Write-Log "RemoteControlAgent 已在用户 session 启动 (PID=$($running.Id))" 'WARN'
 } else {
-    Write-UserRun -Sid $TargetSID -ValueName $RunValueName -Command $runCmd
-    if ($AutoRunAfterUpdate) {
-        $autoStarted = Start-RemoteControlAgentInUserSession -Sid $TargetSID -Command $runCmd -ExePath $agentExe
-    }
-    if (-not $autoStarted) {
-        Write-Log "目标用户下次登录时会自动运行。SYSTEM 写入 Run 不一定能立刻触发当前用户 session 启动。" 'WARN'
-    }
+    Write-Log "未检测到 RemoteControlAgent 进程, 等几秒再 Get-Process 看看 — 任务可能正在加载 OpenCV DLL" 'WARN'
 }
-
-Set-Content -Path $installedMarker -Value (Get-Date -Format 'o') -Encoding ASCII
 
 Write-Host ""
-Write-Host "  RemoteControlAgent SID install ready  " -ForegroundColor Green -BackgroundColor Black
-Write-Host "  TargetSID: $TargetSID"
-Write-Host "  Command:   $runCmd"
-Write-Host "  Version:   $($manifest.version)"
-Write-Host "  AutoRun:   $autoStarted"
-if ($changed) {
-    Write-Host "  Files:     updated"
-} else {
-    Write-Host "  Files:     already current"
-}
+Write-Host "  RemoteControlAgent 已安装  " -ForegroundColor Green -BackgroundColor Black
+Write-Host "  Install-ID:  $uuid"
+Write-Host "  Task Name:   $taskName"
+Write-Host "  Target User: $($user.Account)  (admin elevated, user session)"
+Write-Host "  Server:      $h`:$p"
+Write-Host "  Version:     $($manifest.version)"
+if ($changed) { Write-Host "  Files:       updated" } else { Write-Host "  Files:       already current" }
 Write-Host ""
-
-
-
-
-
-
-
-
+Write-Host "  日常更新只需再跑一次同一个 iex 命令; UUID + Task 都会沿用。"
+Write-Host ""
