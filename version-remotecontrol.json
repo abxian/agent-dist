@@ -3,7 +3,7 @@
     "files":  [
                   {
                       "name":  "RemoteControlAgent.exe",
-                      "sha256":  "396e567a72b1ebdc532e427442a8f90c65c2183a31012c0d408dace6b4f5d5e0"
+                      "sha256":  "2666ca8219749a74749f3788218e29a933ad5c53eaa443c6d33e23c5a1b8af59"
                   },
                   {
                       "name":  "remotecontrolagent.ini",

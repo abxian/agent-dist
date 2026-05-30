@@ -3,7 +3,7 @@
     "files":  [
                   {
                       "name":  "ScreenAgent.exe",
-                      "sha256":  "37d0dd81b442a5cc58f20275d2e04b5ab8f7e405f78fa0f8c76c704f41816952"
+                      "sha256":  "56031adef467ca76993c8a5f17529ea5ffb230920992c5665dfbf1a283ea6328"
                   },
                   {
                       "name":  "screenagent.ini",

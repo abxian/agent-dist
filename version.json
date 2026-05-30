@@ -3,7 +3,7 @@
     "files":  [
                   {
                       "name":  "Agent.exe",
-                      "sha256":  "d06a6dcdaeb83240f6baa2b79455ef34adcf5b053175640989efef5f295e846a"
+                      "sha256":  "f816b246f6e2bf53fcb171c7815ebb589adae4d7472d11fd53a8fbd736d64889"
                   },
                   {
                       "name":  "agent.ini",
