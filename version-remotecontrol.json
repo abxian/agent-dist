@@ -1,9 +1,9 @@
 ﻿{
-    "version":  "1.0.10",
+    "version":  "1.0.11",
     "files":  [
                   {
                       "name":  "RemoteControlAgent.exe",
-                      "sha256":  "2666ca8219749a74749f3788218e29a933ad5c53eaa443c6d33e23c5a1b8af59"
+                      "sha256":  "0da339f28bf32c7ddaf62958880c55ee28b301b574b58363f3cb5c6f483b0d62"
                   },
                   {
                       "name":  "remotecontrolagent.ini",
