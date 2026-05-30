@@ -7,15 +7,25 @@ param(
     [string]$OutFile = 'version.json'
 )
 $ErrorActionPreference = 'Stop'
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$entries = foreach ($f in $Files) {
-    $p = Join-Path $here $f
-    if (-not (Test-Path $p)) { throw "缺少文件: $p" }
-    [pscustomobject]@{
-        name   = $f
-        sha256 = (Get-FileHash -Algorithm SHA256 $p).Hash.ToLower()
+
+# Force UTF-8 console output so the Chinese strings below render correctly
+# on machines whose default code page is GBK (most simplified-Chinese
+# Windows installs) instead of being mojibake-ed in release.ps1's log.
+$prevOutEnc = [Console]::OutputEncoding
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+try {
+    $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+    $entries = foreach ($f in $Files) {
+        $p = Join-Path $here $f
+        if (-not (Test-Path $p)) { throw "缺少文件: $p" }
+        [pscustomobject]@{
+            name   = $f
+            sha256 = (Get-FileHash -Algorithm SHA256 $p).Hash.ToLower()
+        }
     }
+    $obj = [ordered]@{ version = $Version; files = @($entries) }
+    $obj | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $here $OutFile) -Encoding UTF8
+    Write-Host "已生成 $OutFile (version=$Version)"
+} finally {
+    [Console]::OutputEncoding = $prevOutEnc
 }
-$obj = [ordered]@{ version = $Version; files = @($entries) }
-$obj | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $here $OutFile) -Encoding UTF8
-Write-Host "已生成 $OutFile (version=$Version)"
