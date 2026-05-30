@@ -1,13 +1,10 @@
-$ScriptFlavor = 'remotecontrol-cn-uuid-task-20260601'
+$ScriptFlavor = 'remotecontrol-cn-task-20260601'
 <#
-RemoteControlAgent 安装脚本 (国内源优先, UUID + 管理员计划任务版本)
+RemoteControlAgent 安装脚本 (国内源优先, 管理员计划任务版本)
 
 亮点:
-  - 自动 elevate 到管理员 (UAC), 不用先开 admin shell
+  - 自动 elevate 到管理员 (UAC); SYSTEM 自动跳过 UAC 直接装
   - 自动检测当前登录的交互用户, 不再要求脚本顶部硬编码 SID
-  - 每台机器生成一次性 UUID, 保存在 InstallDir\install.uuid, 用于:
-      * Scheduled Task 名 (RemoteControlAgent_<uuid>) — 避免多机或重复装时冲突
-      * Agent ini 的 ; install-id 注释 — Server UI 编辑配置时看得见
   - 装成 Scheduled Task "At log on" 触发, RunLevel HIGHEST (管理员)
       * 跑在用户 session, 能抓到桌面 (不黑屏)
       * 同时是管理员, 能抓到 UAC / 提升窗口, 能 SendInput 到 elevated 进程
@@ -41,7 +38,7 @@ $ErrorActionPreference = 'Stop'
     [Net.SecurityProtocolType]::Tls
 
 $ManifestName = 'version-remotecontrol.json'
-$TaskPrefix   = 'RemoteControlAgent_'
+$TaskName     = 'RemoteControlAgent'
 
 # ── Logging ─────────────────────────────────────────────────────────────────
 function Write-Log {
@@ -176,28 +173,20 @@ if (-not $manifest) {
     }
 }
 
-# ── Install dir + UUID ──────────────────────────────────────────────────────
+# ── Install dir ─────────────────────────────────────────────────────────────
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
-$uuidFile = Join-Path $InstallDir 'install.uuid'
-if (Test-Path $uuidFile) {
-    $uuid = (Get-Content $uuidFile -Raw).Trim()
-    Write-Log "复用已有 install UUID: $uuid"
-} else {
-    # 8-char prefix of a real GUID — short enough for task names, still
-    # unique-enough that two installs on the same network collide ~never.
-    $uuid = ([Guid]::NewGuid().ToString('N')).Substring(0, 8)
-    Set-Content -Path $uuidFile -Value $uuid -Encoding ASCII
-    Write-Log "生成新 install UUID: $uuid" 'WARN'
-}
-$taskName    = "$TaskPrefix$uuid"
-$versionFile = Join-Path $InstallDir 'installed.version'
+$versionFile  = Join-Path $InstallDir 'installed.version'
 $localVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { '' }
-$agentExe    = Join-Path $InstallDir 'RemoteControlAgent.exe'
+$agentExe     = Join-Path $InstallDir 'RemoteControlAgent.exe'
+
+# Clean up the install.uuid file an earlier version of this script wrote;
+# no longer used. (Safe to leave behind, just tidiness.)
+Remove-Item (Join-Path $InstallDir 'install.uuid') -Force -ErrorAction SilentlyContinue
 
 Write-Log "安装目录:  $InstallDir" 'WARN'
-Write-Log "Task 名:   $taskName" 'WARN'
+Write-Log "Task 名:   $TaskName" 'WARN'
 Write-Log "本地版本:  '$localVersion'  远端版本: '$($manifest.version)'" 'WARN'
 
 # ── Clean up legacy footprints — service / Run keys / old tasks ─────────────
@@ -224,9 +213,10 @@ foreach ($k in Get-ChildItem Registry::HKEY_USERS -ErrorAction SilentlyContinue)
     }
 }
 
-# Any scheduled tasks our prefix owns (across UUID changes too — defensive)
+# Old scheduled tasks: the fixed name + any legacy UUID-suffixed name
+# left over from earlier versions of this script.
 foreach ($t in (Get-ScheduledTask -ErrorAction SilentlyContinue)) {
-    if ($t.TaskName -like "$TaskPrefix*" -or $t.TaskName -eq 'RemoteControlAgent') {
+    if ($t.TaskName -eq $TaskName -or $t.TaskName -like 'RemoteControlAgent_*') {
         Write-Log "删除旧任务: $($t.TaskName)" 'WARN'
         try { Unregister-ScheduledTask -TaskName $t.TaskName -Confirm:$false } catch {}
     }
@@ -283,15 +273,12 @@ Set-Content -Path $versionFile -Value $manifest.version -Encoding ASCII
 
 if (-not (Test-Path $agentExe)) { Fail "RemoteControlAgent.exe 不存在: $agentExe" 32 }
 
-# ── Write fresh ini (server config + install-id comment) ────────────────────
+# ── Write fresh ini (server config only) ────────────────────────────────────
 $iniPath = Join-Path $InstallDir 'remotecontrolagent.ini'
 $h = if ($ServerIp) { $ServerIp } else { 'sx1.jc116.com' }
 $p = if ($ServerPort -gt 0) { $ServerPort } else { 9999 }
 $w = if ($ServerPassword) { $ServerPassword } else { '' }
 $iniContent = @"
-; ================================================
-; Remote Control Agent — install-id: $uuid
-; ================================================
 [Server]
 Host=$h
 Port=$p
@@ -330,18 +317,18 @@ $settings = New-ScheduledTaskSettingsSet `
             -MultipleInstances IgnoreNew
 
 Register-ScheduledTask `
-    -TaskName $taskName `
+    -TaskName $TaskName `
     -Action $action `
     -Trigger $trigger `
     -Principal $principal `
     -Settings $settings `
     -Force | Out-Null
-Write-Log "已注册 Scheduled Task: $taskName (atLogon, $($user.Account), RunLevel=Highest)" 'WARN'
+Write-Log "已注册 Scheduled Task: $TaskName (atLogon, $($user.Account), RunLevel=Highest)" 'WARN'
 
 # ── Fire once now so the agent is up in the current session without ─────────
 # waiting for a logoff/logon cycle.
 try {
-    Start-ScheduledTask -TaskName $taskName
+    Start-ScheduledTask -TaskName $TaskName
     Start-Sleep -Seconds 2
 } catch {
     Write-Log "立即触发任务失败, 用户下次登录会自动起。错误: $($_.Exception.Message)" 'WARN'
@@ -358,12 +345,11 @@ if ($running) {
 
 Write-Host ""
 Write-Host "  RemoteControlAgent 已安装  " -ForegroundColor Green -BackgroundColor Black
-Write-Host "  Install-ID:  $uuid"
-Write-Host "  Task Name:   $taskName"
+Write-Host "  Task Name:   $TaskName"
 Write-Host "  Target User: $($user.Account)  (admin elevated, user session)"
 Write-Host "  Server:      $h`:$p"
 Write-Host "  Version:     $($manifest.version)"
 if ($changed) { Write-Host "  Files:       updated" } else { Write-Host "  Files:       already current" }
 Write-Host ""
-Write-Host "  日常更新只需再跑一次同一个 iex 命令; UUID + Task 都会沿用。"
+Write-Host "  日常更新只需再跑一次同一个 iex 命令; 旧 Task 会被自动覆盖。"
 Write-Host ""
