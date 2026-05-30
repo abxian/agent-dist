@@ -1,9 +1,9 @@
 ﻿{
-    "version":  "1.0.11",
+    "version":  "1.0.12",
     "files":  [
                   {
                       "name":  "Server.exe",
-                      "sha256":  "c6fdd8750b3bd8b4cd1af0dd1b7c410fa58127cd1af953a4201f42d2d64a60fc"
+                      "sha256":  "63cf733d5fdaa1ab22b879687b3be8700f5c054cf654a773960394b66ea52667"
                   }
               ]
 }
