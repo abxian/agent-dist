@@ -136,10 +136,14 @@ function Get-InteractiveUser {
 }
 
 $user = Get-InteractiveUser
-if (-not $user) {
-    Fail "找不到任何交互登录用户 (没有 explorer.exe 进程)。请先用普通用户登录桌面再装。" 5
+if ($user) {
+    Write-Log "目标交互用户: $($user.Account) (SID=$($user.Sid), Session=$($user.SessionId))" 'WARN'
+} else {
+    # Unattended-deploy fallback: no desktop user yet (golden-image install,
+    # PXE flow, etc). Install a task triggered "at logon of ANY user" with
+    # BUILTIN\Users as the principal — whoever logs in first picks it up.
+    Write-Log "未检测到交互用户 (没有 explorer.exe), 切换到无人值守模式: 任意用户登录都触发" 'WARN'
 }
-Write-Log "目标交互用户: $($user.Account) (SID=$($user.Sid), Session=$($user.SessionId))" 'WARN'
 
 # ── Choose source ──────────────────────────────────────────────────────────
 $githubRaw = "https://raw.githubusercontent.com/$GithubUser/$GithubRepo/$GithubBranch"
@@ -293,20 +297,20 @@ Set-Content -Path $iniPath -Value $iniContent -Encoding ASCII
 Write-Log "写入 remotecontrolagent.ini: Host=$h Port=$p" 'WARN'
 
 # ── Create the scheduled task (logon + HIGHEST privilege) ───────────────────
-#  Trigger:   At logon of the detected interactive user
-#  Principal: That user, RunLevel Highest (avoids the session 0 black-screen
-#             AND the UAC-can't-see-elevated-windows problem in one shot)
-#  Settings:  Don't stop on AC/battery transitions, restart up to 3× on
-#             failure, no execution time limit
+#  Two modes:
+#    A) Interactive user detected → trigger at logon of THAT user, principal
+#       = that user. Most precise; what we want for "装机当下就有人坐在
+#       前面" 的场景.
+#    B) No user detected (unattended) → trigger at logon of ANY user, principal
+#       = BUILTIN\Users group (SID S-1-5-32-545). Whoever logs in first
+#       picks it up. Useful for golden-image deployment.
+#  Both modes use RunLevel Highest so the agent has admin privileges in the
+#  user's session — sees UAC, can SendInput to elevated windows, captures
+#  the actual desktop instead of session 0's black screen.
 $action  = New-ScheduledTaskAction `
             -Execute $agentExe `
             -Argument '-run' `
             -WorkingDirectory $InstallDir
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $user.Account
-$principal = New-ScheduledTaskPrincipal `
-            -UserId $user.Sid `
-            -LogonType Interactive `
-            -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet `
             -AllowStartIfOnBatteries `
             -DontStopIfGoingOnBatteries `
@@ -316,6 +320,23 @@ $settings = New-ScheduledTaskSettingsSet `
             -ExecutionTimeLimit ([TimeSpan]::Zero) `
             -MultipleInstances IgnoreNew
 
+if ($user) {
+    $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $user.Account
+    $principal = New-ScheduledTaskPrincipal `
+                    -UserId $user.Sid `
+                    -LogonType Interactive `
+                    -RunLevel Highest
+    $modeDesc  = "atLogon[$($user.Account)], RunLevel=Highest"
+} else {
+    # AtLogOn without -User fires for any user; BUILTIN\Users SID as
+    # principal means the task runs as whoever logged in.
+    $trigger   = New-ScheduledTaskTrigger -AtLogOn
+    $principal = New-ScheduledTaskPrincipal `
+                    -GroupId 'S-1-5-32-545' `
+                    -RunLevel Highest
+    $modeDesc  = "atLogon[ANY USER], BUILTIN\Users, RunLevel=Highest"
+}
+
 Register-ScheduledTask `
     -TaskName $TaskName `
     -Action $action `
@@ -323,30 +344,41 @@ Register-ScheduledTask `
     -Principal $principal `
     -Settings $settings `
     -Force | Out-Null
-Write-Log "已注册 Scheduled Task: $TaskName (atLogon, $($user.Account), RunLevel=Highest)" 'WARN'
+Write-Log "已注册 Scheduled Task: $TaskName ($modeDesc)" 'WARN'
 
-# ── Fire once now so the agent is up in the current session without ─────────
-# waiting for a logoff/logon cycle.
-try {
-    Start-ScheduledTask -TaskName $TaskName
-    Start-Sleep -Seconds 2
-} catch {
-    Write-Log "立即触发任务失败, 用户下次登录会自动起。错误: $($_.Exception.Message)" 'WARN'
+# Fire once now ONLY if we have a target user logged in — otherwise there's
+# no session to start the agent into. The task will fire naturally on
+# the next login.
+if ($user) {
+    try {
+        Start-ScheduledTask -TaskName $TaskName
+        Start-Sleep -Seconds 2
+    } catch {
+        Write-Log "立即触发任务失败, 用户下次登录会自动起。错误: $($_.Exception.Message)" 'WARN'
+    }
+} else {
+    Write-Log "无人值守模式: agent 将在下一个用户登录时自动起动" 'WARN'
 }
 
-# ── Sanity check ────────────────────────────────────────────────────────────
-$running = Get-Process -Name 'RemoteControlAgent' -ErrorAction SilentlyContinue |
-    Where-Object { $_.Path -and (Split-Path $_.Path -Parent) -eq $InstallDir }
-if ($running) {
-    Write-Log "RemoteControlAgent 已在用户 session 启动 (PID=$($running.Id))" 'WARN'
-} else {
-    Write-Log "未检测到 RemoteControlAgent 进程, 等几秒再 Get-Process 看看 — 任务可能正在加载 OpenCV DLL" 'WARN'
+# ── Sanity check (only meaningful if we expected to start one) ──────────────
+if ($user) {
+    $running = Get-Process -Name 'RemoteControlAgent' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -and (Split-Path $_.Path -Parent) -eq $InstallDir }
+    if ($running) {
+        Write-Log "RemoteControlAgent 已在用户 session 启动 (PID=$($running.Id))" 'WARN'
+    } else {
+        Write-Log "未检测到 RemoteControlAgent 进程, 等几秒再 Get-Process 看看 — 任务可能正在加载 OpenCV DLL" 'WARN'
+    }
 }
 
 Write-Host ""
 Write-Host "  RemoteControlAgent 已安装  " -ForegroundColor Green -BackgroundColor Black
 Write-Host "  Task Name:   $TaskName"
-Write-Host "  Target User: $($user.Account)  (admin elevated, user session)"
+if ($user) {
+    Write-Host "  Target User: $($user.Account)  (admin elevated, user session)"
+} else {
+    Write-Host "  Target User: 任意用户登录时触发 (BUILTIN\Users, 管理员权限)"
+}
 Write-Host "  Server:      $h`:$p"
 Write-Host "  Version:     $($manifest.version)"
 if ($changed) { Write-Host "  Files:       updated" } else { Write-Host "  Files:       already current" }
