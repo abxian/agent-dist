@@ -1,9 +1,9 @@
 ﻿{
-    "version":  "1.0.12",
+    "version":  "1.0.13",
     "files":  [
                   {
                       "name":  "Agent.exe",
-                      "sha256":  "1ae7d4b45ab8de59629e283b24a5083181245f662088e992bd91b95c9b3046d5"
+                      "sha256":  "5f4f006c6b16faf7e8194a1385c19f9bd8e2e0f193d7d71f005a79059ae7f06a"
                   },
                   {
                       "name":  "agent.ini",
