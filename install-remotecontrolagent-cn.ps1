@@ -70,6 +70,12 @@ if (-not $isAdmin -and -not $isSystem) {
         -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd)
     exit 0
 }
+if ($isSystem) {
+    # SYSTEM is strictly more privileged than Administrator — no UAC needed
+    # and none possible (UAC requires an interactive desktop, session 0 has
+    # none). Continue directly; everything below works the same as Admin.
+    Write-Log "以 SYSTEM 身份运行 — 跳过 UAC, 直接安装" 'WARN'
+}
 
 # ── HTTP helpers (same as old script) ───────────────────────────────────────
 function Get-RemoteFile {
@@ -105,25 +111,31 @@ function Test-SourceReachable {
 
 # ── Auto-detect the interactive user (the one whose desktop we want to see) ─
 function Get-InteractiveUser {
-    # explorer.exe is the canonical "this user has an interactive shell" signal.
-    # When run elevated by an admin who logged in as themselves, this is just
-    # the current user. When run from a SYSTEM context (rare here since we
-    # self-elevate as admin), it's whichever user shell is alive.
+    # explorer.exe is the canonical "this user has an interactive shell"
+    # signal. When called from SYSTEM (e.g. running via PsExec -s or a
+    # remote management agent), multiple sessions may be present —
+    # prefer the lowest non-zero SessionId, which on a typical box is
+    # the local console user (session 1). Skip session 0 (services).
+    $best = $null
     $explorers = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue
     foreach ($p in $explorers) {
+        if ($p.SessionId -le 0) { continue }
         try {
             $owner = $p.GetOwner()
             $sid = $p.GetOwnerSid().Sid
-            if ($owner -and $owner.User -and $sid -match '^S-1-5-21-') {
-                return [pscustomobject]@{
-                    Account   = "$($owner.Domain)\$($owner.User)"
-                    Sid       = $sid
-                    SessionId = $p.SessionId
-                }
+            if (-not $owner -or -not $owner.User) { continue }
+            if ($sid -notmatch '^S-1-5-21-') { continue }
+            $info = [pscustomobject]@{
+                Account   = "$($owner.Domain)\$($owner.User)"
+                Sid       = $sid
+                SessionId = [int]$p.SessionId
+            }
+            if (-not $best -or $info.SessionId -lt $best.SessionId) {
+                $best = $info
             }
         } catch {}
     }
-    return $null
+    return $best
 }
 
 $user = Get-InteractiveUser
