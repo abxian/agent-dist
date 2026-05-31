@@ -1,37 +1,37 @@
-$ScriptFlavor = 'sid-nocv-cn-20260507-reuse-sid-autostart'
+$ScriptFlavor = 'screenagent-cn-task-20260601'
 <#
-ScreenAgent SID 安装脚本 (国内源优先)
+ScreenAgent 安装脚本 (国内源优先, 自动检测用户 + 管理员计划任务版本)
 
-用途:
-  给指定 Windows 用户 SID 写入 HKU\<SID>\Software\Microsoft\Windows\CurrentVersion\Run,
-  让 ScreenAgent 在该用户下次登录时以用户 session 运行。
+亮点:
+  - 自动 elevate 到管理员 (UAC); SYSTEM 自动跳过 UAC 直接装
+  - 自动检测当前登录的交互用户 — 不再要求手动查 SID 再贴进脚本
+  - 装成 Scheduled Task "At log on" 触发, RunLevel HIGHEST (管理员)
+      * 跑在用户 session, 能抓到真实桌面 (不黑屏)
+      * 同时是管理员, 能看到 UAC / 提升窗口
+  - 无人值守 fallback: 没人登录时改成 "任意用户登录都触发"
+    (Principal = BUILTIN\Users), 适合克隆机器/PXE 流水线
+  - 立刻 Run 一次 (有用户的话), 当前 session 直接起 agent
+  - 清理掉旧的 Windows 服务 + HKU\<SID>\Run + HKLM Run + 旧 task, 防止同时跑多份
 
-示例:
-  1. 修改脚本顶部配置区里的 $TargetSID / $ServerIp / $ServerPort
-  2. 直接执行:
-       iex (irm http://114.80.36.225:15667/6/install-screenagent-sid-cn.ps1)
+用法 (国内源, 一行搞定):
+    iex (irm http://114.80.36.225:15667/6/install-screenagent-sid-nocv-cn.ps1)
 
-说明:
-  - 适用于已授权管理的机房/实验室电脑。
-  - SYSTEM 下不会写 S-1-5-18, 只写配置区里的用户 SID。
-  - 给其他 SID 写入 Run 后不会立刻运行, 目标用户下次登录时启动。
+可选: 改下面 $ServerIp / $ServerPort / $ServerPassword 默认值后保存再执行,
+或在执行前 $env:SA_SERVER_IP = 'sx1.jc116.com' 等环境变量临时覆盖。
 #>
 
-# ── 配置区: 直接替换这里, 然后用 iex (irm URL) 一键执行 ─────────────────────
-$TargetSID = 'S-1-5-21-4156230380-561108038-141577317-500'
-$ServerIp = 'sx1.jc116.com'
-$ServerPort = 9999
-$ServerPassword = ''
+# ── 配置区 ───────────────────────────────────────────────────────────────────
+$InstallDir       = "$env:ProgramData\ScreenAgent"
+$ServerIp         = if ($env:SA_SERVER_IP)       { $env:SA_SERVER_IP }       else { 'sx1.jc116.com' }
+$ServerPort       = if ($env:SA_SERVER_PORT)     { [int]$env:SA_SERVER_PORT } else { 9999 }
+$ServerPassword   = if ($env:SA_SERVER_PASSWORD) { $env:SA_SERVER_PASSWORD } else { '' }
 
-$Source = 'cn'   # auto / github / cn
-$InstallDir = "$env:ProgramData\ScreenAgent"
-$GithubUser = 'abxian'
-$GithubRepo = 'agent-dist'
-$GithubBranch = 'main'
-$CnBase = 'http://114.80.36.225:15667/6'
-$RunNowIfSelf = $false
-$AutoRunAfterUpdate = $true
-$ShowInfoLogs = $true
+$Source           = 'cn'   # auto / github / cn
+$GithubUser       = 'abxian'
+$GithubRepo       = 'agent-dist'
+$GithubBranch     = 'main'
+$CnBase           = 'http://114.80.36.225:15667/6'
+$ShowInfoLogs     = $true
 
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol =
@@ -40,26 +40,42 @@ $ErrorActionPreference = 'Stop'
     [Net.SecurityProtocolType]::Tls
 
 $ManifestName = 'version-screen.json'
+$TaskName     = 'ScreenAgent'
+$ServiceName  = 'RemoteScreenAgent'
 $RunValueName = 'ScreenAgent'
 
+# ── Logging ─────────────────────────────────────────────────────────────────
 function Write-Log {
     param([string]$Msg, [string]$Level = 'INFO')
     if (-not $ShowInfoLogs -and $Level -eq 'INFO') { return }
     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $color = switch ($Level) {
-        'ERROR' { 'Red' }
-        'WARN'  { 'Yellow' }
-        default { 'Gray' }
-    }
+    $color = switch ($Level) { 'ERROR' { 'Red' } 'WARN' { 'Yellow' } default { 'Gray' } }
     Write-Host "[$ts][$Level] $Msg" -ForegroundColor $color
 }
+function Fail { param([string]$Msg, [int]$Code = 1) Write-Log $Msg 'ERROR'; exit $Code }
 
-function Fail {
-    param([string]$Msg, [int]$Code = 1)
-    Write-Log $Msg 'ERROR'
-    exit $Code
+# ── Self-elevate (UAC) ──────────────────────────────────────────────────────
+$me = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($me)
+$isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$isSystem = ($me.User.Value -eq 'S-1-5-18')
+
+if (-not $isAdmin -and -not $isSystem) {
+    Write-Log "当前不是管理员, 自动 elevate (会弹 UAC)..." 'WARN'
+    $cmd = "iex (irm http://114.80.36.225:15667/6/install-screenagent-sid-nocv-cn.ps1)"
+    Start-Process powershell.exe `
+        -Verb RunAs `
+        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd)
+    exit 0
+}
+if ($isSystem) {
+    # SYSTEM is strictly more privileged than Administrator — no UAC needed
+    # and none possible (UAC requires an interactive desktop, session 0 has
+    # none). Continue directly; everything below works the same as Admin.
+    Write-Log "以 SYSTEM 身份运行 — 跳过 UAC, 直接安装" 'WARN'
 }
 
+# ── HTTP helpers ────────────────────────────────────────────────────────────
 function Get-RemoteFile {
     param([string]$Url, [string]$OutFile, [int]$TimeoutSec = 30)
     $tmp = "$OutFile.downloading"
@@ -75,333 +91,74 @@ function Get-RemoteFile {
         return $false
     }
 }
-
 function Get-RemoteString {
     param([string]$Url, [int]$TimeoutSec = 15)
-    try {
-        return (Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec $TimeoutSec).Content
-    } catch {
-        return $null
-    }
+    try { return (Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec $TimeoutSec).Content }
+    catch { return $null }
 }
-
 function Get-FileSha256 {
     param([string]$Path)
     if (-not (Test-Path $Path)) { return $null }
     return (Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLower()
 }
-
 function Test-SourceReachable {
     param([string]$Url)
-    try {
-        $req = [Net.HttpWebRequest]::Create($Url)
-        $req.Method = 'HEAD'
-        $req.Timeout = 4000
-        $resp = $req.GetResponse()
-        $resp.Close()
-        return $true
-    } catch {
-        return $false
-    }
+    try { $req = [Net.HttpWebRequest]::Create($Url); $req.Method = 'HEAD'; $req.Timeout = 4000; $req.GetResponse().Close(); return $true }
+    catch { return $false }
 }
 
-function Mount-UserHiveIfNeeded {
-    param([string]$Sid)
-
-    $hivePath = "Registry::HKEY_USERS\$Sid"
-    if (Test-Path $hivePath) {
-        return $false
-    }
-
-    $profileListPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$Sid"
-    if (-not (Test-Path $profileListPath)) {
-        Fail "找不到该 SID 的 ProfileList: $profileListPath" 20
-    }
-
-    $profilePathRaw = (Get-ItemProperty $profileListPath).ProfileImagePath
-    if (-not $profilePathRaw) {
-        Fail "ProfileList 中没有 ProfileImagePath: $profileListPath" 21
-    }
-
-    $profilePath = [Environment]::ExpandEnvironmentVariables($profilePathRaw)
-    $ntuser = Join-Path $profilePath 'NTUSER.DAT'
-    if (-not (Test-Path $ntuser)) {
-        Fail "找不到用户 hive: $ntuser" 22
-    }
-
-    Write-Log "临时加载用户 hive: $ntuser"
-    $loadOut = & reg.exe load "HKU\$Sid" "$ntuser" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Fail "reg load 失败: $loadOut" 23
-    }
-
-    return $true
-}
-
-function Unmount-UserHive {
-    param([string]$Sid)
-    [gc]::Collect()
-    [gc]::WaitForPendingFinalizers()
-    Start-Sleep -Milliseconds 800
-
-    $tmp = Join-Path $env:TEMP "screenagent-reg-unload-$($Sid -replace '[^A-Za-z0-9-]', '_').txt"
-    $err = Join-Path $env:TEMP "screenagent-reg-unload-$($Sid -replace '[^A-Za-z0-9-]', '_').err.txt"
-    $p = Start-Process `
-        -FilePath "$env:SystemRoot\System32\reg.exe" `
-        -ArgumentList @('unload', "HKU\$Sid") `
-        -Wait `
-        -PassThru `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput $tmp `
-        -RedirectStandardError $err
-    $code = $p.ExitCode
-    $out = if (Test-Path $tmp) { Get-Content $tmp -Raw -ErrorAction SilentlyContinue } else { '' }
-    $errOut = if (Test-Path $err) { Get-Content $err -Raw -ErrorAction SilentlyContinue } else { '' }
-    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-    Remove-Item $err -Force -ErrorAction SilentlyContinue
-
-    if ($code -ne 0) {
-        Write-Log "reg unload 失败但安装继续。通常是系统还占用 hive, 重启后会自然释放。SID=HKU\$Sid 输出=$out $errOut" 'WARN'
-    }
-}
-
-function Write-UserRun {
-    param(
-        [string]$Sid,
-        [string]$ValueName,
-        [string]$Command
-    )
-
-    $mustUnload = Mount-UserHiveIfNeeded -Sid $Sid
-    try {
-        $runKey = "Registry::HKEY_USERS\$Sid\Software\Microsoft\Windows\CurrentVersion\Run"
-        if (-not (Test-Path $runKey)) {
-            New-Item -Path $runKey -Force | Out-Null
-        }
-
-        New-ItemProperty `
-            -Path $runKey `
-            -Name $ValueName `
-            -Value $Command `
-            -PropertyType String `
-            -Force | Out-Null
-
-        $got = (Get-ItemProperty -Path $runKey -Name $ValueName).$ValueName
-        if ($got -ne $Command) {
-            Fail "Run 写入后校验失败: 期望=$Command 实际=$got" 24
-        }
-
-        Write-Log "已写入 HKU\$Sid\...\Run\$ValueName = $Command" 'WARN'
-    } finally {
-        if ($mustUnload) {
-            Unmount-UserHive -Sid $Sid
-        }
-    }
-}
-
-function Get-RunValueFromSid {
-    param(
-        [string]$Sid,
-        [string]$ValueName
-    )
-    $runKey = "Registry::HKEY_USERS\$Sid\Software\Microsoft\Windows\CurrentVersion\Run"
-    try {
-        if (-not (Test-Path $runKey)) { return $null }
-        $props = Get-ItemProperty -Path $runKey -Name $ValueName -ErrorAction SilentlyContinue
-        if (-not $props) { return $null }
-        return $props.$ValueName
-    } catch {
-        return $null
-    }
-}
-
-function Find-ExistingUserRun {
-    param(
-        [string]$ValueName,
-        [string]$ExpectedExe
-    )
-
-    $expected = $ExpectedExe.ToLowerInvariant()
-    $loaded = Get-ChildItem Registry::HKEY_USERS -ErrorAction SilentlyContinue |
-        Where-Object { $_.PSChildName -match '^S-1-5-21-\d+-\d+-\d+-\d+$' }
-
-    foreach ($k in $loaded) {
-        $sid = $k.PSChildName
-        $value = Get-RunValueFromSid -Sid $sid -ValueName $ValueName
-        if ($value -and $value.ToLowerInvariant().Contains($expected)) {
-            return [pscustomobject]@{ Sid = $sid; Value = $value; Loaded = $true }
-        }
-    }
-
-    $profiles = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' -ErrorAction SilentlyContinue |
-        Where-Object { $_.PSChildName -match '^S-1-5-21-\d+-\d+-\d+-\d+$' }
-
-    foreach ($p in $profiles) {
-        $sid = $p.PSChildName
-        if ($loaded.PSChildName -contains $sid) { continue }
-
-        $profilePathRaw = (Get-ItemProperty $p.PSPath -ErrorAction SilentlyContinue).ProfileImagePath
-        if (-not $profilePathRaw) { continue }
-        $profilePath = [Environment]::ExpandEnvironmentVariables($profilePathRaw)
-        $ntuser = Join-Path $profilePath 'NTUSER.DAT'
-        if (-not (Test-Path $ntuser)) { continue }
-
-        $loadedHere = $false
-        try {
-            $loadOut = & reg.exe load "HKU\$sid" "$ntuser" 2>&1
-            if ($LASTEXITCODE -ne 0) { continue }
-            $loadedHere = $true
-
-            $value = Get-RunValueFromSid -Sid $sid -ValueName $ValueName
-            if ($value -and $value.ToLowerInvariant().Contains($expected)) {
-                return [pscustomobject]@{ Sid = $sid; Value = $value; Loaded = $false }
-            }
-        } catch {
-        } finally {
-            if ($loadedHere) {
-                Unmount-UserHive -Sid $sid
-            }
-        }
-    }
-
-    return $null
-}
-
-function Test-ScreenAgentRunning {
-    param([string]$ExePath)
-    $target = $ExePath.ToLowerInvariant()
-    $procs = Get-Process -Name 'ScreenAgent' -ErrorAction SilentlyContinue
-    foreach ($p in $procs) {
-        try {
-            if ($p.Path -and $p.Path.ToLowerInvariant() -eq $target) {
-                return $true
-            }
-        } catch {}
-    }
-    return $false
-}
-
-function Get-LoggedOnUserBySid {
-    param([string]$Sid)
-
+# ── Auto-detect the interactive user (the one whose desktop we want to see) ─
+function Get-InteractiveUser {
+    # explorer.exe is the canonical "this user has an interactive shell"
+    # signal. When called from SYSTEM (PsExec -s / remote mgmt tool /
+    # service), multiple sessions may be present — prefer the lowest
+    # non-zero SessionId, which on a typical box is the local console
+    # user (session 1). Skip session 0 (services).
+    $best = $null
     $explorers = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue
     foreach ($p in $explorers) {
+        if ($p.SessionId -le 0) { continue }
         try {
-            $ownerSid = $p.GetOwnerSid()
-            if (-not $ownerSid -or $ownerSid.Sid -ne $Sid) { continue }
-
             $owner = $p.GetOwner()
-            if ($owner -and $owner.User) {
-                return [pscustomobject]@{
-                    Account = "$($owner.Domain)\$($owner.User)"
-                    SessionId = $p.SessionId
-                }
+            $sid = $p.GetOwnerSid().Sid
+            if (-not $owner -or -not $owner.User) { continue }
+            if ($sid -notmatch '^S-1-5-21-') { continue }
+            $info = [pscustomobject]@{
+                Account   = "$($owner.Domain)\$($owner.User)"
+                Sid       = $sid
+                SessionId = [int]$p.SessionId
+            }
+            if (-not $best -or $info.SessionId -lt $best.SessionId) {
+                $best = $info
             }
         } catch {}
     }
-
-    return $null
+    return $best
 }
 
-function Start-ScreenAgentInUserSession {
-    param(
-        [string]$Sid,
-        [string]$Command,
-        [string]$ExePath
-    )
-
-    $user = Get-LoggedOnUserBySid -Sid $Sid
-    if (-not $user) {
-        Write-Log "目标 SID 当前没有检测到交互登录 session, 保留为下次登录自启。SID=$Sid" 'WARN'
-        return $false
-    }
-
-    $taskName = "ScreenAgent-Start-$($Sid.Split('-')[-1])"
-    $startTime = (Get-Date).AddMinutes(1).ToString('HH:mm')
-
-    try { & schtasks.exe /Delete /TN $taskName /F 2>$null | Out-Null } catch {}
-
-    $createOut = & schtasks.exe /Create `
-        /TN $taskName `
-        /TR $Command `
-        /SC ONCE `
-        /ST $startTime `
-        /F `
-        /RL LIMITED `
-        /RU $user.Account `
-        /IT 2>&1
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Log "创建一次性启动任务失败, 将等待下次登录自启。User=$($user.Account) 输出=$createOut" 'WARN'
-        return $false
-    }
-
-    $runOut = & schtasks.exe /Run /TN $taskName 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Log "运行一次性启动任务失败, 将等待下次登录自启。Task=$taskName 输出=$runOut" 'WARN'
-        return $false
-    }
-
-    Start-Sleep -Seconds 3
-    try { & schtasks.exe /Delete /TN $taskName /F 2>$null | Out-Null } catch {}
-
-    if (Test-ScreenAgentRunning -ExePath $ExePath) {
-        Write-Log "已通过交互用户计划任务启动 ScreenAgent。User=$($user.Account) Session=$($user.SessionId)" 'WARN'
-        return $true
-    }
-
-    Write-Log "计划任务已触发, 但暂未检测到 ScreenAgent 进程。若目标用户未解锁桌面, 会在下次登录自启。" 'WARN'
-    return $false
+$user = Get-InteractiveUser
+if ($user) {
+    Write-Log "目标交互用户: $($user.Account) (SID=$($user.Sid), Session=$($user.SessionId))" 'WARN'
+} else {
+    Write-Log "未检测到交互用户 (没有 explorer.exe), 切换到无人值守模式: 任意用户登录都触发" 'WARN'
 }
 
-$me = [Security.Principal.WindowsIdentity]::GetCurrent()
-$meSID = $me.User.Value
-$isSystem = ($meSID -eq 'S-1-5-18')
-$principal = New-Object Security.Principal.WindowsPrincipal($me)
-$isAdmin = $principal.IsInRole(
-    [Security.Principal.WindowsBuiltInRole]::Administrator
-)
-
-$agentExeForSidDetect = Join-Path $InstallDir 'ScreenAgent.exe'
-$existingRun = Find-ExistingUserRun -ValueName $RunValueName -ExpectedExe $agentExeForSidDetect
-$reusedExistingSid = $false
-if ($existingRun) {
-    $TargetSID = $existingRun.Sid
-    $reusedExistingSid = $true
-    Write-Log "检测到已安装 Run 项, 复用 SID=$TargetSID, 不再校验脚本顶部 SID。Value=$($existingRun.Value)" 'WARN'
-}
-
-if (-not $reusedExistingSid -and ($TargetSID -eq 'REPLACE_WITH_TARGET_USER_SID' -or $TargetSID -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$')) {
-    Fail "请先替换脚本顶部 `$DefaultTargetSID, 或执行时传入 -TargetSID。当前值: $TargetSID" 9
-}
-if ($TargetSID -eq 'S-1-5-18') {
-    Fail "拒绝写入 SYSTEM SID (S-1-5-18)。请传入真实登录用户 SID。" 10
-}
-
-$isSelf = ($TargetSID -eq $meSID)
-if (-not $isSelf -and -not ($isAdmin -or $isSystem)) {
-    Fail "给其他 SID 写入 Run 需要管理员或 SYSTEM 权限。当前 SID=$meSID" 11
-}
-
+# ── Choose source ──────────────────────────────────────────────────────────
 $githubRaw = "https://raw.githubusercontent.com/$GithubUser/$GithubRepo/$GithubBranch"
-$sources = @{
-    github = $githubRaw
-    cn = $CnBase
-}
-
+$sources = @{ github = $githubRaw; cn = $CnBase }
 function Resolve-Source {
     param([string]$Preferred)
     if ($Preferred -ne 'auto') { return $Preferred }
     Write-Log "自动检测最佳源..."
-    if (Test-SourceReachable "$CnBase/$ManifestName") { return 'cn' }
+    if (Test-SourceReachable "$CnBase/$ManifestName")    { return 'cn' }
     if (Test-SourceReachable "$githubRaw/$ManifestName") { return 'github' }
     return 'cn'
 }
-
 $chosen = Resolve-Source -Preferred $Source
 $base = $sources[$chosen]
 Write-Log "使用源: $chosen ($base)" 'WARN'
 
+# ── Manifest ────────────────────────────────────────────────────────────────
 $manifestUrl = "$base/$ManifestName"
 $manifestRaw = Get-RemoteString $manifestUrl
 $manifestRaw = if ($manifestRaw) { $manifestRaw.TrimStart([char]0xFEFF) } else { $manifestRaw }
@@ -411,46 +168,60 @@ if ($manifestRaw) {
     try { $manifest = $manifestRaw | ConvertFrom-Json } catch { $manifest = $null }
 }
 if (-not $manifest) {
-    Write-Log "未获取到 $ManifestName, 回退为强制下载模式" 'WARN'
+    Write-Log "未获取到 $ManifestName, 回退为时间戳版本号 + 强制下载" 'WARN'
     $manifest = [pscustomobject]@{
         version = (Get-Date -Format 'yyyyMMddHHmm')
-        files = $defaultFiles | ForEach-Object {
-            [pscustomobject]@{ name = $_; sha256 = $null }
-        }
+        files = $defaultFiles | ForEach-Object { [pscustomobject]@{ name = $_; sha256 = $null } }
     }
 }
 
+# ── Install dir ─────────────────────────────────────────────────────────────
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
-
-$versionFile = Join-Path $InstallDir 'installed.version'
+$versionFile  = Join-Path $InstallDir 'installed.version'
 $localVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { '' }
-$agentExe = Join-Path $InstallDir 'ScreenAgent.exe'
-$installedMarker = Join-Path $InstallDir '.installed.sid'
+$agentExe     = Join-Path $InstallDir 'ScreenAgent.exe'
 
-Write-Log "安装目录: $InstallDir" 'WARN'
-Write-Log "运行身份: $($me.Name) ($meSID), TargetSID=$TargetSID" 'WARN'
-Write-Log "本地版本: '$localVersion'  远端版本: '$($manifest.version)'" 'WARN'
+Write-Log "安装目录:  $InstallDir" 'WARN'
+Write-Log "Task 名:   $TaskName" 'WARN'
+Write-Log "本地版本:  '$localVersion'  远端版本: '$($manifest.version)'" 'WARN'
 
-# 清理旧服务形态, 避免 ScreenAgent 同时跑在 Session 0 和用户 session。
-$svc = Get-Service -Name 'RemoteScreenAgent' -ErrorAction SilentlyContinue
+# ── Clean up legacy footprints — service / Run keys / old tasks ─────────────
+$svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($svc) {
-    Write-Log "清理旧 Windows 服务 RemoteScreenAgent" 'WARN'
-    try { & sc.exe stop RemoteScreenAgent | Out-Null } catch {}
+    Write-Log "清理旧 Windows 服务 $ServiceName (避免 session 0 黑屏)" 'WARN'
+    try { & sc.exe stop   $ServiceName | Out-Null } catch {}
     Start-Sleep -Seconds 1
-    try { & sc.exe delete RemoteScreenAgent | Out-Null } catch {}
+    try { & sc.exe delete $ServiceName | Out-Null } catch {}
 }
-try { & schtasks.exe /End /TN ScreenAgent 2>$null | Out-Null } catch {}
-try { & schtasks.exe /Delete /TN ScreenAgent /F 2>$null | Out-Null } catch {}
+
+# Old HKLM Run entry from earlier installers
 try {
-    Remove-ItemProperty `
-        -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' `
-        -Name $RunValueName `
-        -Force `
-        -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' `
+        -Name $RunValueName -Force -ErrorAction SilentlyContinue
 } catch {}
 
+# Old HKU\<SID>\Run entry from the SID-based installer this script replaces.
+# Walk every currently-loaded user hive and wipe the value name.
+foreach ($k in Get-ChildItem Registry::HKEY_USERS -ErrorAction SilentlyContinue) {
+    if ($k.PSChildName -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { continue }
+    $runKey = "Registry::HKEY_USERS\$($k.PSChildName)\Software\Microsoft\Windows\CurrentVersion\Run"
+    if (Test-Path $runKey) {
+        try { Remove-ItemProperty -Path $runKey -Name $RunValueName -Force -ErrorAction SilentlyContinue } catch {}
+    }
+}
+
+# Old scheduled tasks: the fixed name + any legacy "ScreenAgent-Start-..."
+# variants left over from the previous one-shot-launch helper.
+foreach ($t in (Get-ScheduledTask -ErrorAction SilentlyContinue)) {
+    if ($t.TaskName -eq $TaskName -or $t.TaskName -like 'ScreenAgent-*') {
+        Write-Log "删除旧任务: $($t.TaskName)" 'WARN'
+        try { Unregister-ScheduledTask -TaskName $t.TaskName -Confirm:$false } catch {}
+    }
+}
+
+# Kill any agent process still running from this install dir
 Get-Process -Name 'ScreenAgent' -ErrorAction SilentlyContinue | ForEach-Object {
     try {
         if ($_.Path -and (Split-Path $_.Path -Parent) -eq $InstallDir) {
@@ -461,42 +232,25 @@ Get-Process -Name 'ScreenAgent' -ErrorAction SilentlyContinue | ForEach-Object {
 }
 Start-Sleep -Milliseconds 500
 
+# ── Download / verify files (skip ini + opencv on hash-drift) ───────────────
 $hasLocalIni = Test-Path (Join-Path $InstallDir 'screenagent.ini')
 $changed = $false
-
 foreach ($f in $manifest.files) {
     $name = $f.name
     $remoteHash = if ($f.PSObject.Properties.Name -contains 'sha256') { $f.sha256 } else { $null }
     $dst = Join-Path $InstallDir $name
     $localHash = Get-FileSha256 $dst
-
-    # OpenCV runtime is large and stable. screenagent.ini is rewritten below
-    # from the configured server fields. Do not let line-ending/hash drift in
-    # these files block installing the actual ScreenAgent.exe.
     $skipHash = (($name -ieq 'opencv_world4100.dll') -or ($name -ieq 'screenagent.ini'))
     if ($skipHash -and (Test-Path $dst)) {
-        Write-Log "跳过运行时/配置文件 (本地已存在, 不校验): $name" 'WARN'
+        Write-Log "跳过运行时/配置文件 (本地已存在): $name"
         continue
     }
-
-    if ($name -eq 'screenagent.ini' -and $hasLocalIni) {
-        Write-Log "保留本地配置: screenagent.ini"
-        continue
-    }
-
+    if ($name -eq 'screenagent.ini' -and $hasLocalIni) { continue }
     $needDownload = $false
-    if (-not (Test-Path $dst)) {
-        $needDownload = $true
-    } elseif ($remoteHash -and -not $skipHash) {
-        if ($localHash -ne $remoteHash.ToLower()) { $needDownload = $true }
-    } elseif ($localVersion -ne $manifest.version) {
-        $needDownload = $true
-    }
-
-    if (-not $needDownload) {
-        Write-Log "跳过 (已是最新): $name"
-        continue
-    }
+    if (-not (Test-Path $dst)) { $needDownload = $true }
+    elseif ($remoteHash -and -not $skipHash) { if ($localHash -ne $remoteHash.ToLower()) { $needDownload = $true } }
+    elseif ($localVersion -ne $manifest.version) { $needDownload = $true }
+    if (-not $needDownload) { Write-Log "跳过 (已是最新): $name"; continue }
 
     $url = "$base/$name"
     Write-Log "下载: $url" 'WARN'
@@ -507,33 +261,23 @@ foreach ($f in $manifest.files) {
         Write-Log "尝试备用源: $altUrl" 'WARN'
         $ok = Get-RemoteFile -Url $altUrl -OutFile $dst
     }
-    if (-not $ok) {
-        Fail "无法下载 $name" 30
-    }
-
+    if (-not $ok) { Fail "无法下载 $name" 30 }
     if ($remoteHash -and -not $skipHash) {
         $newHash = Get-FileSha256 $dst
-        if ($newHash -ne $remoteHash.ToLower()) {
-            Fail "$name 校验失败 期望=$remoteHash 实际=$newHash" 31
-        }
-    } elseif ($skipHash) {
-        Write-Log "运行时/配置文件已下载, 跳过 SHA 校验: $name" 'WARN'
+        if ($newHash -ne $remoteHash.ToLower()) { Fail "$name 校验失败 期望=$remoteHash 实际=$newHash" 31 }
     }
     $changed = $true
 }
-
 Set-Content -Path $versionFile -Value $manifest.version -Encoding ASCII
 
-if (-not (Test-Path $agentExe)) {
-    Fail "ScreenAgent.exe 不存在: $agentExe" 32
-}
+if (-not (Test-Path $agentExe)) { Fail "ScreenAgent.exe 不存在: $agentExe" 32 }
 
+# ── Write fresh ini (server config only) ────────────────────────────────────
 $iniPath = Join-Path $InstallDir 'screenagent.ini'
-if (($ServerIp -or $ServerPort -gt 0 -or $ServerPassword) -or -not (Test-Path $iniPath)) {
-    $h = if ($ServerIp) { $ServerIp } else { 'sx1.jc116.com' }
-    $p = if ($ServerPort -gt 0) { $ServerPort } else { 9999 }
-    $w = if ($ServerPassword) { $ServerPassword } else { '' }
-    $iniContent = @"
+$h = if ($ServerIp) { $ServerIp } else { 'sx1.jc116.com' }
+$p = if ($ServerPort -gt 0) { $ServerPort } else { 9999 }
+$w = if ($ServerPassword) { $ServerPassword } else { '' }
+$iniContent = @"
 [Server]
 Host=$h
 Port=$p
@@ -544,54 +288,88 @@ ReconnectSeconds=10
 ; JPEG quality 1-100 (higher = clearer but more bandwidth)
 Quality=100
 "@
-    Set-Content -Path $iniPath -Value $iniContent -Encoding ASCII
-    Write-Log "写入 screenagent.ini: Host=$h Port=$p" 'WARN'
+Set-Content -Path $iniPath -Value $iniContent -Encoding ASCII
+Write-Log "写入 screenagent.ini: Host=$h Port=$p" 'WARN'
+
+# ── Create the scheduled task (logon + HIGHEST privilege) ───────────────────
+#  Two modes:
+#    A) Interactive user detected → trigger at logon of THAT user, principal
+#       = that user. The typical "有人在桌面前" 场景.
+#    B) No user detected (unattended) → trigger at logon of ANY user, principal
+#       = BUILTIN\Users group (SID S-1-5-32-545). 首次有人登录就接管.
+#  两种模式都用 RunLevel Highest 拿管理员权限，避免 session 0 黑屏 + UAC
+#  看不见 / SendInput 不到提升进程的问题.
+$action  = New-ScheduledTaskAction `
+            -Execute $agentExe `
+            -Argument '-run' `
+            -WorkingDirectory $InstallDir
+$settings = New-ScheduledTaskSettingsSet `
+            -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries `
+            -StartWhenAvailable `
+            -RestartCount 3 `
+            -RestartInterval (New-TimeSpan -Minutes 1) `
+            -ExecutionTimeLimit ([TimeSpan]::Zero) `
+            -MultipleInstances IgnoreNew
+
+if ($user) {
+    $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $user.Account
+    $principal = New-ScheduledTaskPrincipal `
+                    -UserId $user.Sid `
+                    -LogonType Interactive `
+                    -RunLevel Highest
+    $modeDesc  = "atLogon[$($user.Account)], RunLevel=Highest"
+} else {
+    $trigger   = New-ScheduledTaskTrigger -AtLogOn
+    $principal = New-ScheduledTaskPrincipal `
+                    -GroupId 'S-1-5-32-545' `
+                    -RunLevel Highest
+    $modeDesc  = "atLogon[ANY USER], BUILTIN\Users, RunLevel=Highest"
 }
 
-$runCmd = "`"$agentExe`" -run"
-$autoStarted = $false
-if ($isSelf) {
-    $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-    New-ItemProperty `
-        -Path $runKey `
-        -Name $RunValueName `
-        -Value $runCmd `
-        -PropertyType String `
-        -Force | Out-Null
-    Write-Log "已写入 HKCU\...\Run\$RunValueName = $runCmd" 'WARN'
+Register-ScheduledTask `
+    -TaskName $TaskName `
+    -Action $action `
+    -Trigger $trigger `
+    -Principal $principal `
+    -Settings $settings `
+    -Force | Out-Null
+Write-Log "已注册 Scheduled Task: $TaskName ($modeDesc)" 'WARN'
 
-    if ($RunNowIfSelf -or $AutoRunAfterUpdate) {
-        Start-Process -FilePath $agentExe -ArgumentList '-run' -WorkingDirectory $InstallDir -WindowStyle Hidden
-        Write-Log "已在当前用户 session 启动 ScreenAgent.exe -run" 'WARN'
-        $autoStarted = $true
+# Fire once now ONLY if we have a target user logged in.
+if ($user) {
+    try {
+        Start-ScheduledTask -TaskName $TaskName
+        Start-Sleep -Seconds 2
+    } catch {
+        Write-Log "立即触发任务失败, 用户下次登录会自动起。错误: $($_.Exception.Message)" 'WARN'
     }
 } else {
-    Write-UserRun -Sid $TargetSID -ValueName $RunValueName -Command $runCmd
-    if ($AutoRunAfterUpdate) {
-        $autoStarted = Start-ScreenAgentInUserSession -Sid $TargetSID -Command $runCmd -ExePath $agentExe
-    }
-    if (-not $autoStarted) {
-        Write-Log "目标用户下次登录时会自动运行。SYSTEM 写入 Run 不一定能立刻触发当前用户 session 启动。" 'WARN'
+    Write-Log "无人值守模式: agent 将在下一个用户登录时自动起动" 'WARN'
+}
+
+# ── Sanity check (only meaningful in mode A) ────────────────────────────────
+if ($user) {
+    $running = Get-Process -Name 'ScreenAgent' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -and (Split-Path $_.Path -Parent) -eq $InstallDir }
+    if ($running) {
+        Write-Log "ScreenAgent 已在用户 session 启动 (PID=$($running.Id))" 'WARN'
+    } else {
+        Write-Log "未检测到 ScreenAgent 进程, 等几秒再 Get-Process 看看 — 任务可能正在加载 OpenCV DLL" 'WARN'
     }
 }
 
-Set-Content -Path $installedMarker -Value (Get-Date -Format 'o') -Encoding ASCII
-
 Write-Host ""
-Write-Host "  ScreenAgent SID install ready  " -ForegroundColor Green -BackgroundColor Black
-Write-Host "  TargetSID: $TargetSID"
-Write-Host "  Command:   $runCmd"
-Write-Host "  Version:   $($manifest.version)"
-Write-Host "  AutoRun:   $autoStarted"
-if ($changed) {
-    Write-Host "  Files:     updated"
+Write-Host "  ScreenAgent 已安装  " -ForegroundColor Green -BackgroundColor Black
+Write-Host "  Task Name:   $TaskName"
+if ($user) {
+    Write-Host "  Target User: $($user.Account)  (admin elevated, user session)"
 } else {
-    Write-Host "  Files:     already current"
+    Write-Host "  Target User: 任意用户登录时触发 (BUILTIN\Users, 管理员权限)"
 }
+Write-Host "  Server:      $h`:$p"
+Write-Host "  Version:     $($manifest.version)"
+if ($changed) { Write-Host "  Files:       updated" } else { Write-Host "  Files:       already current" }
 Write-Host ""
-
-
-
-
-
-
+Write-Host "  日常更新只需再跑一次同一个 iex 命令; 旧 Task 会被自动覆盖。"
+Write-Host ""
