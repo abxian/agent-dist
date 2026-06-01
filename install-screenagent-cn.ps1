@@ -24,9 +24,9 @@ param(
     [string]$ServerPassword = '',
 
     # 给哪个用户注册登录自启(写 HKU\<SID>\...\Run)
-    # 默认 = 当前跑脚本的用户(= HKCU, 不需要管理员)
-    # 给别人装需要管理员权限; 目标用户没登录时会自动 reg load NTUSER.DAT 后写再 unload
-    [string]$TargetUser = $env:USERNAME,
+    # 留空 = 自动: 普通用户跑 = 当前用户; SYSTEM 跑 = 自动检测当前登录的交互用户
+    # 显式指定 = 给该用户装, 需要管理员权限; 目标用户没登录时会 reg load NTUSER.DAT
+    [string]$TargetUser = '',
 
     # GitHub 仓库
     [string]$GithubUser = 'abxian',
@@ -56,7 +56,8 @@ function Write-Log {
 }
 
 function Get-RemoteFile {
-    param([string]$Url,[string]$OutFile,[int]$TimeoutSec = 30)
+    # 默认 600s: 64MB 的 opencv_world4100.dll 在慢网络上常常超过 30s
+    param([string]$Url,[string]$OutFile,[int]$TimeoutSec = 600)
     $tmp = "$OutFile.downloading"
     if (Test-Path $tmp) { Remove-Item $tmp -Force }
     try {
@@ -95,6 +96,30 @@ function Test-SourceReachable {
         $resp.Close()
         return $true
     } catch { return $false }
+}
+
+# ---------- 自动检测交互用户 (用于 SYSTEM 跑时确定 TargetUser) ----------
+# 通过 explorer.exe 找出哪个用户拥有桌面会话. session 0 (服务) 跳过, 选最低非零 SessionId.
+function Get-InteractiveUser {
+    $best = $null
+    $explorers = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue
+    foreach ($p in $explorers) {
+        if ($p.SessionId -le 0) { continue }
+        try {
+            $owner = $p.GetOwner()
+            $sid   = $p.GetOwnerSid().Sid
+            if (-not $owner -or -not $owner.User) { continue }
+            if ($sid -notmatch '^S-1-5-21-') { continue }
+            $info = [pscustomobject]@{
+                Account   = "$($owner.Domain)\$($owner.User)"
+                User      = $owner.User
+                Sid       = $sid
+                SessionId = [int]$p.SessionId
+            }
+            if (-not $best -or $info.SessionId -lt $best.SessionId) { $best = $info }
+        } catch {}
+    }
+    return $best
 }
 
 # ---------- 选择源 ----------
@@ -260,10 +285,29 @@ Quality=100
     Write-Log "写入 screenagent.ini: Host=$h Port=$p"
 }
 
+# ---------- 解析 TargetUser (空 = 自动) ----------
+$currentUser = $env:USERNAME
+$isSystem    = [Security.Principal.WindowsIdentity]::GetCurrent().IsSystem
+
+if (-not $TargetUser) {
+    if ($isSystem) {
+        $detected = Get-InteractiveUser
+        if ($detected) {
+            $TargetUser = $detected.User
+            Write-Log "SYSTEM 跑, 自动检测到交互用户: $($detected.Account) Session=$($detected.SessionId)" 'WARN'
+        } else {
+            Write-Log "SYSTEM 跑但没检测到登录的交互用户(无 explorer.exe). ScreenAgent 必须依附用户桌面, 让目标用户先登录一次再重跑此脚本" 'ERROR'
+            exit 4
+        }
+    } else {
+        $TargetUser = $currentUser
+    }
+}
+
 # ---------- 注册登录自启动: 写目标用户的 HKU\<SID>\...\Run ────────────────
 # 自己装自己 -> HKCU, 不需要管理员
 # 给别人装    -> HKU\<SID>, 需要管理员; hive 没加载就 reg load 后写完再 unload
-$me      = $env:USERNAME
+$me      = $currentUser
 $isSelf  = ($TargetUser -eq $me)
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
@@ -330,17 +374,43 @@ if ($isFirstInstall) {
 }
 
 # ---------- 启动 ----------
-# 装给自己 -> 当前 PowerShell 已经在用户 session, Start-Process 直接拉起, 不用等登录
-# 装给别人 -> 当前 shell 不在目标用户 session, 等他下次登录时 Run 键自动触发
+# isSelf   -> 已在用户 session, Start-Process 直接起
+# SYSTEM 跨用户 -> 用一次性计划任务把 agent 拉到该用户 session
+# 其它(管理员给别的用户装) -> 等下次登录, Run 键已设
+$launchedNow = $false
 if ($isSelf) {
     try {
         Start-Process -FilePath $agentExe -ArgumentList '-run' -WorkingDirectory $InstallDir -WindowStyle Hidden
+        $launchedNow = $true
     } catch {
         Write-Log "ScreenAgent.exe -run 启动失败: $($_.Exception.Message)" 'ERROR'
         exit 5
     }
+} elseif ($isSystem) {
+    $bootTask = "ScreenAgentBoot_$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+    try {
+        $action    = New-ScheduledTaskAction -Execute $agentExe -Argument '-run' -WorkingDirectory $InstallDir
+        $principal = New-ScheduledTaskPrincipal -UserId $TargetUser -LogonType Interactive -RunLevel Limited
+        $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+        Register-ScheduledTask -TaskName $bootTask -Action $action -Principal $principal -Settings $settings -Force | Out-Null
+        Start-ScheduledTask -TaskName $bootTask
+        Start-Sleep -Seconds 2
+        Unregister-ScheduledTask -TaskName $bootTask -Confirm:$false
+        $launchedNow = $true
+        Write-Log "已通过一次性计划任务在 $TargetUser session 启动 ScreenAgent" 'WARN'
+    } catch {
+        Write-Log "立即启动失败 (Run 键已设, 下次登录会自动起): $($_.Exception.Message)" 'WARN'
+    }
 } else {
-    Write-Log "目标用户 $TargetUser 下次登录时自动启动"
+    Write-Log "目标用户 $TargetUser 下次登录时自动启动 (Run 键已设)" 'WARN'
+}
+
+# ---------- 验证: 轮询 5 秒确认进程在跑 ----------
+$running = $null
+for ($i = 0; $i -lt 10; $i++) {
+    $running = Get-Process -Name 'ScreenAgent' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($running) { break }
+    Start-Sleep -Milliseconds 500
 }
 
 if ($changed) {
@@ -350,5 +420,11 @@ if ($changed) {
 }
 
 Write-Host ""
-Write-Host "  ScreenAgent ready  " -ForegroundColor Green -BackgroundColor Black
+if ($running) {
+    Write-Host "  ScreenAgent: Running (PID=$($running.Id), user=$TargetUser)  " -ForegroundColor Green -BackgroundColor Black
+} elseif ($launchedNow) {
+    Write-Host "  ScreenAgent: 已触发启动, 但 5s 内未见进程. 可能在加载 OpenCV, 几秒后再 Get-Process ScreenAgent" -ForegroundColor Yellow -BackgroundColor Black
+} else {
+    Write-Host "  ScreenAgent: Run 键已设 (用户=$TargetUser), 该用户下次登录自动起" -ForegroundColor Yellow -BackgroundColor Black
+}
 Write-Host ""

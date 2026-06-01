@@ -46,7 +46,8 @@ function Write-Log {
 }
 
 function Get-RemoteFile {
-    param([string]$Url,[string]$OutFile,[int]$TimeoutSec = 30)
+    # 默认 600s: 64MB 的 opencv_world4100.dll 在慢网络上常常超过 30s
+    param([string]$Url,[string]$OutFile,[int]$TimeoutSec = 600)
     $tmp = "$OutFile.downloading"
     if (Test-Path $tmp) { Remove-Item $tmp -Force }
     try {
@@ -275,25 +276,51 @@ Height=1080
 
 if ($isFirstInstall) {
     Write-Log "首次安装, 执行 Agent.exe -install"
+    $installExit = -1
     try {
         $p = Start-Process -FilePath $agentExe -ArgumentList '-install' -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru -Wait
-        if ($p.ExitCode -ne 0) {
-            Write-Log "Agent.exe -install 退出码=$($p.ExitCode)" 'WARN'
-        }
+        $installExit = $p.ExitCode
     } catch {
-        Write-Log "Agent.exe -install 失败: $($_.Exception.Message)" 'ERROR'
+        Write-Log "Agent.exe -install 启动失败: $($_.Exception.Message)" 'ERROR'
         exit 4
     }
+    if ($installExit -ne 0) {
+        Write-Log "Agent.exe -install 退出码=$installExit, 服务注册失败" 'ERROR'
+        Write-Log "排查: 当前 shell 是否管理员/SYSTEM 权限? $InstallDir\opencv_world4100.dll 是否存在(应 64MB)?" 'ERROR'
+        exit 4
+    }
+    # 注册成功才写标记 (失败时不写, 下次重跑可再次尝试 -install)
     Set-Content -Path $installedMarker -Value (Get-Date -Format 'o') -Encoding ASCII
 }
 
 # ---------- 启动 (Agent.exe -start) ----------
 Write-Log "启动 Agent.exe -start"
 try {
-    Start-Process -FilePath $agentExe -ArgumentList '-start' -WorkingDirectory $InstallDir -WindowStyle Hidden
+    $p = Start-Process -FilePath $agentExe -ArgumentList '-start' -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru -Wait
+    if ($p.ExitCode -ne 0) {
+        Write-Log "Agent.exe -start 退出码=$($p.ExitCode)" 'ERROR'
+    }
 } catch {
-    Write-Log "Agent.exe -start 失败: $($_.Exception.Message)" 'ERROR'
+    Write-Log "Agent.exe -start 启动失败: $($_.Exception.Message)" 'ERROR'
     exit 5
+}
+
+# ---------- 验证服务真在跑 (轮询 10 秒) ----------
+$svcName = 'RemoteCameraAgent'
+$svc = $null
+for ($i = 0; $i -lt 20; $i++) {
+    $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+    if ($svc -and $svc.Status -eq 'Running') { break }
+    Start-Sleep -Milliseconds 500
+}
+if (-not $svc) {
+    Write-Log "服务 $svcName 不存在, 注册可能被跳过. 试: Remove-Item '$installedMarker' -Force; 再重跑此脚本" 'ERROR'
+    exit 6
+}
+if ($svc.Status -ne 'Running') {
+    Write-Log "服务 $svcName 状态=$($svc.Status), 启动失败" 'ERROR'
+    Write-Log "排查: Get-EventLog System -Source 'Service Control Manager' -Newest 10" 'ERROR'
+    exit 7
 }
 
 if ($changed) {
@@ -304,5 +331,6 @@ if ($changed) {
 
 # ---------- 最终成功提示 ----------
 Write-Host ""
+Write-Host "  Service $svcName : Running  " -ForegroundColor Green -BackgroundColor Black
 Write-Host "  enjoy work  " -ForegroundColor Green -BackgroundColor Black
 Write-Host ""
