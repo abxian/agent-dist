@@ -204,12 +204,35 @@ try {
 } catch {}
 
 # Old HKU\<SID>\Run entry from the SID-based installer this script replaces.
-# Walk every currently-loaded user hive and wipe the value name.
-foreach ($k in Get-ChildItem Registry::HKEY_USERS -ErrorAction SilentlyContinue) {
-    if ($k.PSChildName -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { continue }
-    $runKey = "Registry::HKEY_USERS\$($k.PSChildName)\Software\Microsoft\Windows\CurrentVersion\Run"
-    if (Test-Path $runKey) {
-        try { Remove-ItemProperty -Path $runKey -Name $RunValueName -Force -ErrorAction SilentlyContinue } catch {}
+# 遍历所有 user profile (Win32_UserProfile), 不只是当前已加载 hive 的用户.
+# 离线用户的 hive 用 reg load / reg unload 临时挂上, 否则他们下次登录时会从
+# Run 键拉起第二份 ScreenAgent (同 RC 之前出现的 2 个实例 bug).
+foreach ($prof in (Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue |
+                   Where-Object { $_.LocalPath -like 'C:\Users\*' -and -not $_.Special })) {
+    $sid = $prof.SID
+    $needUnload = $false
+    if (-not $prof.Loaded) {
+        $ntuser = Join-Path $prof.LocalPath 'NTUSER.DAT'
+        if (-not (Test-Path $ntuser)) { continue }
+        & reg load "HKU\$sid" "$ntuser" 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { continue }  # 多半是用户正在登录, 跳过
+        $needUnload = $true
+    }
+    try {
+        $runKey = "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Run"
+        if (Test-Path $runKey) {
+            $cur = (Get-ItemProperty -Path $runKey -Name $RunValueName -ErrorAction SilentlyContinue).$RunValueName
+            if ($cur) {
+                Remove-ItemProperty -Path $runKey -Name $RunValueName -Force -ErrorAction SilentlyContinue
+                Write-Log "清理 HKU\$sid\...\Run\$RunValueName (旧 install 残留)" 'WARN'
+            }
+        }
+    } finally {
+        if ($needUnload) {
+            [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+            Start-Sleep -Milliseconds 300
+            & reg unload "HKU\$sid" 2>&1 | Out-Null
+        }
     }
 }
 

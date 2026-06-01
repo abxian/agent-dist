@@ -209,12 +209,36 @@ try {
         -Name 'RemoteControlAgent' -Force -ErrorAction SilentlyContinue
 } catch {}
 
-# Old HKU\<SID>\Run entry from the previous SID-based installer
-foreach ($k in Get-ChildItem Registry::HKEY_USERS -ErrorAction SilentlyContinue) {
-    if ($k.PSChildName -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { continue }
-    $runKey = "Registry::HKEY_USERS\$($k.PSChildName)\Software\Microsoft\Windows\CurrentVersion\Run"
-    if (Test-Path $runKey) {
-        try { Remove-ItemProperty -Path $runKey -Name 'RemoteControlAgent' -Force -ErrorAction SilentlyContinue } catch {}
+# Old HKU\<SID>\Run entry from the previous SID-based installer.
+# 遍历所有 user profile (Win32_UserProfile), 不只是当前已加载 hive 的用户.
+# 离线用户的 hive 用 reg load / reg unload 临时挂上, 否则他们登录时还会从 Run
+# 键拉起第二份 agent (前一次出现过 2 个实例同时跑的 bug).
+foreach ($prof in (Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue |
+                   Where-Object { $_.LocalPath -like 'C:\Users\*' -and -not $_.Special })) {
+    $sid = $prof.SID
+    $needUnload = $false
+    if (-not $prof.Loaded) {
+        $ntuser = Join-Path $prof.LocalPath 'NTUSER.DAT'
+        if (-not (Test-Path $ntuser)) { continue }
+        & reg load "HKU\$sid" "$ntuser" 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { continue }  # 多半是用户正在登录, 跳过
+        $needUnload = $true
+    }
+    try {
+        $runKey = "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Run"
+        if (Test-Path $runKey) {
+            $cur = (Get-ItemProperty -Path $runKey -Name 'RemoteControlAgent' -ErrorAction SilentlyContinue).RemoteControlAgent
+            if ($cur) {
+                Remove-ItemProperty -Path $runKey -Name 'RemoteControlAgent' -Force -ErrorAction SilentlyContinue
+                Write-Log "清理 HKU\$sid\...\Run\RemoteControlAgent (旧 install 残留)" 'WARN'
+            }
+        }
+    } finally {
+        if ($needUnload) {
+            [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+            Start-Sleep -Milliseconds 300
+            & reg unload "HKU\$sid" 2>&1 | Out-Null
+        }
     }
 }
 

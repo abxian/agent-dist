@@ -136,9 +136,23 @@ function Check-App($title, $dir, $exeName, $iniName, $manifest, $serviceName, $r
         Check 'Server TCP' "$serverHost`:$port" ($(if (Tcp-Test $serverHost $port) { 'OK' } else { 'BAD' }))
     }
 
+    # 提前收集自启信息, 让 Process not-running 时能区分 "真挂了" vs "等触发"
+    $svc  = if ($serviceName) { Get-Service -Name $serviceName -ErrorAction SilentlyContinue } else { $null }
+    $runs = if ($runName)     { @(Run-Entries $runName) }                                     else { @() }
+    $hasService    = $svc -and $svc.StartType -ne 'Disabled'
+    $hasRunOrTask  = $runs.Count -gt 0
+    $hasAutoStart  = $hasService -or $hasRunOrTask
+
     $procs = @(Get-CimInstance Win32_Process -Filter "Name='$exeName'" -ErrorAction SilentlyContinue)
     if ($procs.Count -eq 0) {
-        Check 'Process' 'not running' 'BAD'
+        # 区分: Windows 服务应该一直在跑 (BAD); Scheduled Task/Run 键 AtLogOn 等触发是正常 (WARN)
+        if ($hasService -and $svc.Status -ne 'Running') {
+            Check 'Process' 'not running (service should be Running)' 'BAD'
+        } elseif ($hasRunOrTask) {
+            Check 'Process' 'not running (auto-start configured, will start on next user logon)' 'WARN'
+        } else {
+            Check 'Process' 'not running' 'BAD'
+        }
     } else {
         Check 'Process' "$($procs.Count) running" 'OK'
         foreach ($p in $procs) {
@@ -147,13 +161,11 @@ function Check-App($title, $dir, $exeName, $iniName, $manifest, $serviceName, $r
     }
 
     if ($serviceName) {
-        $svc = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
         if ($svc) { Check "Service $serviceName" "$($svc.Status) / $($svc.StartType)" ($(if ($svc.Status -eq 'Running') { 'OK' } else { 'BAD' })) }
-        else { Check "Service $serviceName" 'missing' 'WARN' }
+        else      { Check "Service $serviceName" 'missing' 'WARN' }
     }
 
     if ($runName) {
-        $runs = @(Run-Entries $runName)
         Check "Run $runName" "$($runs.Count) entries" ($(if ($runs.Count -gt 0) { 'OK' } else { 'WARN' }))
         foreach ($r in $runs) {
             Write-Host ("  {0} = {1}" -f $r.Path, $r.Value) -ForegroundColor Gray
