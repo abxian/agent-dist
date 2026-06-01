@@ -59,7 +59,8 @@ function Fail {
 }
 
 function Get-RemoteFile {
-    param([string]$Url, [string]$OutFile, [int]$TimeoutSec = 30)
+    # 默认 600s: 64MB 的 opencv_world4100.dll 在慢网络上常常超过 30s
+    param([string]$Url, [string]$OutFile, [int]$TimeoutSec = 600)
     $tmp = "$OutFile.downloading"
     if (Test-Path $tmp) { Remove-Item $tmp -Force }
     try {
