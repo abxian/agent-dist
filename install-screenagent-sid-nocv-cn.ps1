@@ -175,6 +175,16 @@ if (-not $manifest) {
         files = $defaultFiles | ForEach-Object { [pscustomobject]@{ name = $_; sha256 = $null } }
     }
 }
+# A stale/custom manifest must not be allowed to omit runtime dependencies.
+# CAM_OPENCV_URL is still honoured by the generated delivery installer.
+$manifestFiles = @($manifest.files)
+foreach ($requiredName in $defaultFiles) {
+    if (-not ($manifestFiles | Where-Object { $_.name -ieq $requiredName })) {
+        Write-Log "版本清单缺少必需文件, 自动补充: $requiredName" 'WARN'
+        $manifestFiles += [pscustomobject]@{ name = $requiredName; sha256 = $null }
+    }
+}
+$manifest.files = $manifestFiles
 
 # ── Install dir ─────────────────────────────────────────────────────────────
 if (-not (Test-Path $InstallDir)) {
@@ -265,8 +275,14 @@ foreach ($f in $manifest.files) {
     $dst = Join-Path $InstallDir $name
     $localHash = Get-FileSha256 $dst
     $skipHash = (($name -ieq 'opencv_world4100.dll') -or ($name -ieq 'screenagent.ini'))
-    if ($skipHash -and (Test-Path $dst)) {
+    $runtimeValid = ($name -ieq 'opencv_world4100.dll') -and (Test-Path $dst) -and
+        ((Get-Item -LiteralPath $dst).Length -ge 10MB)
+    if (($name -ieq 'screenagent.ini') -and (Test-Path $dst)) {
         Write-Log "跳过运行时/配置文件 (本地已存在): $name"
+        continue
+    }
+    if ($runtimeValid) {
+        Write-Log "跳过 OpenCV DLL (本地文件有效): $name"
         continue
     }
     if ($name -eq 'screenagent.ini' -and $hasLocalIni) { continue }
@@ -286,6 +302,10 @@ foreach ($f in $manifest.files) {
         $ok = Get-RemoteFile -Url $altUrl -OutFile $dst
     }
     if (-not $ok) { Fail "无法下载 $name" 30 }
+    if (($name -ieq 'opencv_world4100.dll') -and
+        ((-not (Test-Path $dst)) -or ((Get-Item -LiteralPath $dst).Length -lt 10MB))) {
+        Fail "OpenCV DLL 下载结果无效或文件不完整: $dst" 32
+    }
     if ($remoteHash -and -not $skipHash) {
         $newHash = Get-FileSha256 $dst
         if ($newHash -ne $remoteHash.ToLower()) { Fail "$name 校验失败 期望=$remoteHash 实际=$newHash" 31 }
