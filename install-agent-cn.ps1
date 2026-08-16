@@ -19,6 +19,9 @@ param(
     [string]$ServerIp = 'sx1.jc116.com',
     [int]$ServerPort = 9999,
     [string]$ServerPassword = '',
+    [ValidateSet('tcp','tls')]
+    [string]$ServerProtocol = $(if ($env:CAM_SERVER_PROTOCOL) { $env:CAM_SERVER_PROTOCOL } else { 'tcp' }),
+    [string]$CertificateFingerprint = $(if ($env:CAM_SERVER_FINGERPRINT) { $env:CAM_SERVER_FINGERPRINT } else { '' }),
 
     # GitHub 仓库 (用户需在 GitHub 创建并上传文件到 Releases/raw)
     [string]$GithubUser = 'abxian',
@@ -243,6 +246,9 @@ if (($ServerIp -or $ServerPort -gt 0 -or $ServerPassword) -or -not (Test-Path $i
     $h = if ($ServerIp) { $ServerIp } else { 'sx1.jc116.com' }
     $p = if ($ServerPort -gt 0) { $ServerPort } else { 9999 }
     $w = if ($ServerPassword) { $ServerPassword } else { '' }
+    $transport = $ServerProtocol.ToLowerInvariant()
+    $pin = ($CertificateFingerprint -replace '[^0-9a-fA-F]','').ToLowerInvariant()
+    if ($transport -eq 'tls' -and $pin.Length -ne 64) { throw 'TLS requires CAM_SERVER_FINGERPRINT (64 hexadecimal SHA-256 characters)' }
     $iniContent = @"
 ; ================================================
 ; Remote Camera Agent - configuration file
@@ -256,6 +262,8 @@ Host=$h
 Port=$p
 ; Connection password (must match Server.exe, leave empty for none)
 Password=$w
+Protocol=$transport
+CertificateFingerprint=$pin
 ; Reconnect interval in seconds (min 3)
 ReconnectSeconds=10
 

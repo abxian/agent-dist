@@ -25,6 +25,9 @@ $InstallDir       = "$env:ProgramData\ScreenAgent"
 $ServerIp         = if ($env:SA_SERVER_IP)       { $env:SA_SERVER_IP }       else { 'sx1.jc116.com' }
 $ServerPort       = if ($env:SA_SERVER_PORT)     { [int]$env:SA_SERVER_PORT } else { 9999 }
 $ServerPassword   = if ($env:SA_SERVER_PASSWORD) { $env:SA_SERVER_PASSWORD } else { '' }
+$ServerProtocol   = if ($env:CAM_SERVER_PROTOCOL) { $env:CAM_SERVER_PROTOCOL.ToLowerInvariant() } else { 'tcp' }
+$CertificateFingerprint = if ($env:CAM_SERVER_FINGERPRINT) { ($env:CAM_SERVER_FINGERPRINT -replace '[^0-9a-fA-F]','').ToLowerInvariant() } else { '' }
+if ($ServerProtocol -notin @('tcp','tls') -or ($ServerProtocol -eq 'tls' -and $CertificateFingerprint.Length -ne 64)) { throw 'Invalid TLS settings: set CAM_SERVER_PROTOCOL=tls and a 64-hex CAM_SERVER_FINGERPRINT' }
 
 $Source           = 'cn'   # auto / github / cn
 $GithubUser       = 'abxian'
@@ -326,6 +329,8 @@ $iniContent = @"
 Host=$h
 Port=$p
 Password=$w
+Protocol=$ServerProtocol
+CertificateFingerprint=$CertificateFingerprint
 ReconnectSeconds=10
 
 [Screen]
