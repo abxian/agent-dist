@@ -154,8 +154,8 @@ function Get-InteractiveUser {
     foreach ($p in $explorers) {
         if ($p.SessionId -le 0) { continue }
         try {
-            $owner = $p.GetOwner()
-            $sid = $p.GetOwnerSid().Sid
+            $owner = Invoke-CimMethod -InputObject $p -MethodName GetOwner -ErrorAction Stop
+            $sid = (Invoke-CimMethod -InputObject $p -MethodName GetOwnerSid -ErrorAction Stop).Sid
             if (-not $owner -or -not $owner.User) { continue }
             if ($sid -notmatch '^S-1-5-21-') { continue }
             $info = [pscustomobject]@{
@@ -225,8 +225,13 @@ $oldTaskXml   = if ($oldTask) { Export-ScheduledTask -TaskName $TaskName } else 
 $safeVersion  = ([string]$manifest.version -replace '[^0-9A-Za-z._-]', '_')
 $candidateExe = if ($oldTask) { Join-Path $InstallDir "RemoteControlAgent-$safeVersion.exe" } else { $agentExe }
 $candidateMsQuic = if ($oldTask) { Join-Path $InstallDir "msquic-$safeVersion.dll" } else { Join-Path $InstallDir 'msquic.dll' }
+$legacyInstallDir = Join-Path $env:ProgramData 'RemoteControlAgent'
+$runningLegacyImage = Get-CimInstance Win32_Process -Filter "Name like 'RemoteControlAgent%.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ne $candidateExe -and
+                   (Split-Path $_.ExecutablePath -Parent) -in @($InstallDir,$legacyInstallDir) } |
+    Select-Object -First 1
 $needsHandover = [bool]($user -and $oldTask -and
-    ($localVersion -ne [string]$manifest.version -or $oldTask.Actions.Execute -ne $candidateExe))
+    ($localVersion -ne [string]$manifest.version -or $oldTask.Actions.Execute -ne $candidateExe -or $runningLegacyImage))
 
 # Clean up the install.uuid file an earlier version of this script wrote;
 # no longer used. (Safe to leave behind, just tidiness.)
@@ -417,7 +422,7 @@ if ($user) {
 }
 
 function Wait-ReadyFile {
-    param([string]$Path,[int]$TimeoutSeconds = 20)
+    param([string]$Path,[int]$TimeoutSeconds = 45)
     for ($i = 0; $i -lt ($TimeoutSeconds * 10); $i++) {
         if (Test-Path -LiteralPath $Path) { return $true }
         Start-Sleep -Milliseconds 100
@@ -461,7 +466,7 @@ Write-Log "已注册 Scheduled Task: $TaskName ($modeDesc)" 'WARN'
 if ($needsHandover) {
     Get-CimInstance Win32_Process -Filter "Name like 'RemoteControlAgent%.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ne $candidateExe -and
-                       (Split-Path $_.ExecutablePath -Parent) -eq $InstallDir } |
+                       (Split-Path $_.ExecutablePath -Parent) -in @($InstallDir,$legacyInstallDir) } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Start-ScheduledTask -TaskName $TaskName
     if (-not (Wait-ReadyFile -Path $serviceReady)) {

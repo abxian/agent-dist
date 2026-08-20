@@ -287,10 +287,10 @@ function Get-LoggedOnUserBySid {
     $explorers = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue
     foreach ($p in $explorers) {
         try {
-            $ownerSid = $p.GetOwnerSid()
+            $ownerSid = Invoke-CimMethod -InputObject $p -MethodName GetOwnerSid -ErrorAction Stop
             if (-not $ownerSid -or $ownerSid.Sid -ne $Sid) { continue }
 
-            $owner = $p.GetOwner()
+            $owner = Invoke-CimMethod -InputObject $p -MethodName GetOwner -ErrorAction Stop
             if ($owner -and $owner.User) {
                 return [pscustomobject]@{
                     Account = "$($owner.Domain)\$($owner.User)"

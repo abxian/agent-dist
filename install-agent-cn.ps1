@@ -29,10 +29,7 @@ param(
     [string]$GithubBranch = 'main',
 
     # 国内源
-    [string]$CnBase = 'http://114.80.36.225:15667/6',
-
-    # 显示完整过程日志
-    [switch]$Verbose
+    [string]$CnBase = 'http://114.80.36.225:15667/6'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,7 +39,7 @@ $ErrorActionPreference = 'Stop'
 function Write-Log {
     param([string]$Msg,[string]$Level='INFO')
     # 静默模式: 只显示 WARN / ERROR
-    if (-not $Verbose -and $Level -ne 'ERROR') { return }
+    if ($VerbosePreference -eq 'SilentlyContinue' -and $Level -ne 'ERROR') { return }
     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $color = switch ($Level) { 'ERROR' { 'Red' } 'WARN' { 'Yellow' } default { 'Gray' } }
     Write-Host "[$ts][$Level] $Msg" -ForegroundColor $color
@@ -357,7 +354,7 @@ if ($isFirstInstall) {
 
 # ---------- 新旧进程无感交接 ----------
 function Wait-ReadyFile {
-    param([string]$Path,[int]$TimeoutSeconds = 20)
+    param([string]$Path,[int]$TimeoutSeconds = 45)
     for ($i = 0; $i -lt ($TimeoutSeconds * 10); $i++) {
         if (Test-Path -LiteralPath $Path) { return $true }
         Start-Sleep -Milliseconds 100

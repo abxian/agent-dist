@@ -34,10 +34,7 @@ param(
     [string]$GithubBranch = 'main',
 
     # 国内源
-    [string]$CnBase = 'http://114.80.36.225:15667/6',
-
-    # 显示完整过程日志
-    [switch]$Verbose
+    [string]$CnBase = 'http://114.80.36.225:15667/6'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,7 +46,7 @@ $ManifestName = 'version-screen.json'
 # ---------- 基础工具 ----------
 function Write-Log {
     param([string]$Msg,[string]$Level='INFO')
-    if (-not $Verbose -and $Level -ne 'ERROR') { return }
+    if ($VerbosePreference -eq 'SilentlyContinue' -and $Level -ne 'ERROR') { return }
     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $color = switch ($Level) { 'ERROR' { 'Red' } 'WARN' { 'Yellow' } default { 'Gray' } }
     Write-Host "[$ts][$Level] $Msg" -ForegroundColor $color
@@ -106,8 +103,8 @@ function Get-InteractiveUser {
     foreach ($p in $explorers) {
         if ($p.SessionId -le 0) { continue }
         try {
-            $owner = $p.GetOwner()
-            $sid   = $p.GetOwnerSid().Sid
+            $owner = Invoke-CimMethod -InputObject $p -MethodName GetOwner -ErrorAction Stop
+            $sid   = (Invoke-CimMethod -InputObject $p -MethodName GetOwnerSid -ErrorAction Stop).Sid
             if (-not $owner -or -not $owner.User) { continue }
             if ($sid -notmatch '^S-1-5-21-') { continue }
             $info = [pscustomobject]@{
