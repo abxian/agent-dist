@@ -175,6 +175,151 @@ function Get-InteractiveUser {
     return $best
 }
 
+# Task Scheduler may register an InteractiveToken task successfully but still
+# reject an immediate Start-ScheduledTask from session 0 with 0x800710E0.  When
+# the installer itself runs as SYSTEM, start the image with the logged-on
+# user's primary token instead.  The scheduled task is still registered and is
+# used normally on subsequent logons.
+function Initialize-InteractiveProcessLauncher {
+    if ('CamInstaller.UserSessionProcess' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace CamInstaller {
+    public static class UserSessionProcess {
+        private const uint MAXIMUM_ALLOWED = 0x02000000;
+        private const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+        private const uint CREATE_NO_WINDOW = 0x08000000;
+
+        private enum TOKEN_TYPE { TokenPrimary = 1, TokenImpersonation }
+        private enum SECURITY_IMPERSONATION_LEVEL {
+            SecurityAnonymous, SecurityIdentification,
+            SecurityImpersonation, SecurityDelegation
+        }
+        private enum TOKEN_ELEVATION_TYPE { Default = 1, Full, Limited }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TOKEN_LINKED_TOKEN { public IntPtr LinkedToken; }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct STARTUPINFO {
+            public int cb;
+            public string lpReserved;
+            public string lpDesktop;
+            public string lpTitle;
+            public uint dwX, dwY, dwXSize, dwYSize;
+            public uint dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+            public short wShowWindow, cbReserved2;
+            public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PROCESS_INFORMATION {
+            public IntPtr hProcess, hThread;
+            public uint dwProcessId, dwThreadId;
+        }
+
+        [DllImport("Wtsapi32.dll", SetLastError = true)]
+        private static extern bool WTSQueryUserToken(uint sessionId, out IntPtr token);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool DuplicateTokenEx(IntPtr existingToken, uint desiredAccess,
+            IntPtr tokenAttributes, SECURITY_IMPERSONATION_LEVEL level,
+            TOKEN_TYPE tokenType, out IntPtr newToken);
+        [DllImport("advapi32.dll", EntryPoint = "GetTokenInformation", SetLastError = true)]
+        private static extern bool GetTokenElevationType(IntPtr token, int tokenInformationClass,
+            out TOKEN_ELEVATION_TYPE tokenInformation, int tokenInformationLength, out int returnLength);
+        [DllImport("advapi32.dll", EntryPoint = "GetTokenInformation", SetLastError = true)]
+        private static extern bool GetLinkedToken(IntPtr token, int tokenInformationClass,
+            out TOKEN_LINKED_TOKEN tokenInformation, int tokenInformationLength, out int returnLength);
+        [DllImport("userenv.dll", SetLastError = true)]
+        private static extern bool CreateEnvironmentBlock(out IntPtr environment,
+            IntPtr token, bool inherit);
+        [DllImport("userenv.dll", SetLastError = true)]
+        private static extern bool DestroyEnvironmentBlock(IntPtr environment);
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool CreateProcessAsUser(IntPtr token, string applicationName,
+            StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes,
+            bool inheritHandles, uint creationFlags, IntPtr environment,
+            string currentDirectory, ref STARTUPINFO startupInfo,
+            out PROCESS_INFORMATION processInformation);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        public static int Start(uint sessionId, string executable, string arguments,
+            string workingDirectory) {
+            IntPtr userToken = IntPtr.Zero;
+            IntPtr linkedToken = IntPtr.Zero;
+            IntPtr primaryToken = IntPtr.Zero;
+            IntPtr environment = IntPtr.Zero;
+            PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
+            try {
+                if (!WTSQueryUserToken(sessionId, out userToken))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "WTSQueryUserToken failed");
+                IntPtr sourceToken = userToken;
+                TOKEN_ELEVATION_TYPE elevationType;
+                int returned;
+                if (GetTokenElevationType(userToken, 18, out elevationType, sizeof(int), out returned) &&
+                        elevationType == TOKEN_ELEVATION_TYPE.Limited) {
+                    TOKEN_LINKED_TOKEN linked;
+                    if (GetLinkedToken(userToken, 19, out linked, IntPtr.Size, out returned)) {
+                        linkedToken = linked.LinkedToken;
+                        sourceToken = linkedToken;
+                    }
+                }
+                if (!DuplicateTokenEx(sourceToken, MAXIMUM_ALLOWED, IntPtr.Zero,
+                        SECURITY_IMPERSONATION_LEVEL.SecurityImpersonation,
+                        TOKEN_TYPE.TokenPrimary, out primaryToken))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "DuplicateTokenEx failed");
+                if (!CreateEnvironmentBlock(out environment, primaryToken, false))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateEnvironmentBlock failed");
+
+                STARTUPINFO si = new STARTUPINFO();
+                si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+                si.lpDesktop = @"winsta0\default";
+                StringBuilder command = new StringBuilder("\"" + executable + "\"");
+                if (!String.IsNullOrWhiteSpace(arguments)) command.Append(" ").Append(arguments);
+                if (!CreateProcessAsUser(primaryToken, executable, command,
+                        IntPtr.Zero, IntPtr.Zero, false,
+                        CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+                        environment, workingDirectory, ref si, out pi))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessAsUser failed");
+                return checked((int)pi.dwProcessId);
+            } finally {
+                if (pi.hThread != IntPtr.Zero) CloseHandle(pi.hThread);
+                if (pi.hProcess != IntPtr.Zero) CloseHandle(pi.hProcess);
+                if (environment != IntPtr.Zero) DestroyEnvironmentBlock(environment);
+                if (primaryToken != IntPtr.Zero) CloseHandle(primaryToken);
+                if (linkedToken != IntPtr.Zero) CloseHandle(linkedToken);
+                if (userToken != IntPtr.Zero) CloseHandle(userToken);
+            }
+        }
+    }
+}
+'@
+}
+
+function Start-InteractiveAgentProcess {
+    param(
+        [Parameter(Mandatory=$true)][string]$FilePath,
+        [string]$Arguments,
+        [Parameter(Mandatory=$true)][string]$WorkingDirectory,
+        [Parameter(Mandatory=$true)]$TargetUser
+    )
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    if ($currentSid -eq $TargetUser.Sid) {
+        $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments `
+            -WorkingDirectory $WorkingDirectory -WindowStyle Hidden -PassThru
+        return [pscustomobject]@{ Pid = $process.Id; Process = $process; Mode = 'current-user' }
+    }
+    if (-not $isSystem) { throw 'Interactive process launch requires the target user or SYSTEM.' }
+    Initialize-InteractiveProcessLauncher
+    $pidValue = [CamInstaller.UserSessionProcess]::Start(
+        [uint32]$TargetUser.SessionId, $FilePath, $Arguments, $WorkingDirectory)
+    return [pscustomobject]@{ Pid = $pidValue; Process = $null; Mode = 'system-user-token' }
+}
+
 $user = Get-InteractiveUser
 if ($user) {
     Write-Log "目标交互用户: $($user.Account) (SID=$($user.Sid), Session=$($user.SessionId))" 'WARN'
@@ -465,6 +610,7 @@ function Wait-ReadyFile {
 
 $handoverTask = $null
 $candidateProcess = $null
+$candidateProcessId = $null
 $serviceReady = $null
 if ($needsHandover) {
     $token = [Guid]::NewGuid().ToString('N')
@@ -473,12 +619,15 @@ if ($needsHandover) {
     $serviceReady = Join-Path $InstallDir ".handover-screen-task-$token.ready"
     Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
     $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $runCandidateDirect = ($currentSid -eq $user.Sid)
+    $runCandidateDirect = [bool]($user -and (($currentSid -eq $user.Sid) -or $isSystem))
     if ($runCandidateDirect) {
-        Write-Log '当前管理员会话就是目标桌面用户，直接启动候选（绕过可能拒绝按需启动的 Task Scheduler）' 'WARN'
-        $candidateProcess = Start-Process -FilePath $candidateExe `
-            -ArgumentList @('-handover-once','-handover-ready',$candidateReady,'-run') `
-            -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru
+        Write-Log '直接在目标桌面会话启动候选（绕过可能拒绝按需启动的 Task Scheduler）' 'WARN'
+        $candidateLaunch = Start-InteractiveAgentProcess -FilePath $candidateExe `
+            -Arguments ('-handover-once -handover-ready "{0}" -run' -f $candidateReady) `
+            -WorkingDirectory $InstallDir -TargetUser $user
+        $candidateProcess = $candidateLaunch.Process
+        $candidateProcessId = $candidateLaunch.Pid
+        Write-Log "候选启动模式=$($candidateLaunch.Mode), PID=$candidateProcessId, Session=$($user.SessionId)" 'WARN'
     } else {
         $candidateAction = New-ScheduledTaskAction -Execute $candidateExe `
             -Argument ('-handover-once -handover-ready "{0}" -run' -f $candidateReady) `
@@ -490,9 +639,9 @@ if ($needsHandover) {
     Write-Log "候选诊断日志: $candidateReady.log；等待认证最长 45 秒" 'WARN'
     if (-not (Wait-ReadyFile -Path $candidateReady)) {
         if ($runCandidateDirect) {
-            $candidateProcess.Refresh()
-            $candidateCode = if ($candidateProcess.HasExited) { $candidateProcess.ExitCode } else { 'running' }
-            Write-Log "Candidate diagnostics: PID=$($candidateProcess.Id) Exited=$($candidateProcess.HasExited) ExitCode=$candidateCode Log=$candidateReady.log" 'ERROR'
+            $candidateRunning = Get-Process -Id $candidateProcessId -ErrorAction SilentlyContinue
+            $candidateCode = if ($candidateProcess -and $candidateProcess.HasExited) { $candidateProcess.ExitCode } elseif ($candidateRunning) { 'running' } else { 'exited' }
+            Write-Log "Candidate diagnostics: PID=$candidateProcessId State=$candidateCode Log=$candidateReady.log" 'ERROR'
         } else {
             $candidateInfo = Get-ScheduledTaskInfo -TaskName $handoverTask -ErrorAction SilentlyContinue
             $candidateState = (Get-ScheduledTask -TaskName $handoverTask -ErrorAction SilentlyContinue).State
@@ -502,7 +651,7 @@ if ($needsHandover) {
             Get-Content -LiteralPath "$candidateReady.log" -Tail 40 | ForEach-Object { Write-Log "candidate> $_" 'ERROR' }
         }
         if (-not $runCandidateDirect) { Unregister-ScheduledTask -TaskName $handoverTask -Confirm:$false -ErrorAction SilentlyContinue }
-        if ($candidateProcess) { Stop-Process -Id $candidateProcess.Id -Force -ErrorAction SilentlyContinue }
+        if ($candidateProcessId) { Stop-Process -Id $candidateProcessId -Force -ErrorAction SilentlyContinue }
         Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
         Fail "Screen candidate did not receive Server handover confirmation. Old task remains. See $script:InstallLogPath and $candidateReady.log" 40
     }
@@ -543,9 +692,11 @@ if ($needsHandover) {
     $finalProcess = $null
     if ($runCandidateDirect) {
         Write-Log '直接启动正式新进程；计划任务保留用于后续登录自启' 'WARN'
-        $finalProcess = Start-Process -FilePath $candidateExe `
-            -ArgumentList @('-handover-ready',$serviceReady,'-run') `
-            -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru
+        $finalLaunch = Start-InteractiveAgentProcess -FilePath $candidateExe `
+            -Arguments ('-handover-ready "{0}" -run' -f $serviceReady) `
+            -WorkingDirectory $InstallDir -TargetUser $user
+        $finalProcess = $finalLaunch.Process
+        Write-Log "正式进程启动模式=$($finalLaunch.Mode), PID=$($finalLaunch.Pid), Session=$($user.SessionId)" 'WARN'
     } else {
         Start-ScheduledTask -TaskName $TaskName
     }
@@ -571,8 +722,8 @@ if ($needsHandover) {
         }
         if ($runCandidateDirect -and $oldRuntimeExecute) {
             $rollbackArguments = if ($oldTaskArguments) { $oldTaskArguments } else { '-run' }
-            Start-Process -FilePath $oldRuntimeExecute -ArgumentList $rollbackArguments `
-                -WorkingDirectory (Split-Path $oldRuntimeExecute -Parent) -WindowStyle Hidden | Out-Null
+            Start-InteractiveAgentProcess -FilePath $oldRuntimeExecute -Arguments $rollbackArguments `
+                -WorkingDirectory (Split-Path $oldRuntimeExecute -Parent) -TargetUser $user | Out-Null
         } else {
             Start-ScheduledTask -TaskName $TaskName
         }
@@ -587,7 +738,13 @@ if ($needsHandover) {
 # Fire once now ONLY if we have a target user logged in.
 if ($user -and -not $needsHandover) {
     try {
-        Start-ScheduledTask -TaskName $TaskName
+        $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        if (($currentSid -eq $user.Sid) -or $isSystem) {
+            Start-InteractiveAgentProcess -FilePath $candidateExe -Arguments '-run' `
+                -WorkingDirectory $InstallDir -TargetUser $user | Out-Null
+        } else {
+            Start-ScheduledTask -TaskName $TaskName
+        }
         Start-Sleep -Seconds 2
     } catch {
         Write-Log "立即触发任务失败, 用户下次登录会自动起。错误: $($_.Exception.Message)" 'WARN'
