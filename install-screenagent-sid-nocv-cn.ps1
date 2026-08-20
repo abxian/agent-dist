@@ -110,6 +110,29 @@ function Get-FileSha256 {
     if (-not (Test-Path $Path)) { return $null }
     return (Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLower()
 }
+function Set-IniValuePreserve {
+    param([string]$Path,[string]$Section,[string]$Key,[string]$Value)
+    $lines = [System.Collections.Generic.List[string]]::new()
+    if (Test-Path -LiteralPath $Path) { foreach ($line in (Get-Content -LiteralPath $Path)) { [void]$lines.Add([string]$line) } }
+    $sectionStart = -1; $sectionEnd = $lines.Count
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^\s*\[([^]]+)\]\s*$') {
+            if ($sectionStart -ge 0) { $sectionEnd = $i; break }
+            if ($Matches[1] -ieq $Section) { $sectionStart = $i }
+        }
+    }
+    if ($sectionStart -lt 0) {
+        if ($lines.Count -gt 0 -and $lines[$lines.Count - 1] -ne '') { [void]$lines.Add('') }
+        [void]$lines.Add("[$Section]"); [void]$lines.Add("$Key=$Value")
+    } else {
+        $keyIndex = -1
+        for ($i = $sectionStart + 1; $i -lt $sectionEnd; $i++) {
+            if ($lines[$i] -match ('^\s*' + [regex]::Escape($Key) + '\s*=')) { $keyIndex = $i; break }
+        }
+        if ($keyIndex -ge 0) { $lines[$keyIndex] = "$Key=$Value" } else { $lines.Insert($sectionEnd, "$Key=$Value") }
+    }
+    Set-Content -LiteralPath $Path -Value $lines -Encoding ASCII
+}
 function Test-SourceReachable {
     param([string]$Url)
     try { $req = [Net.HttpWebRequest]::Create($Url); $req.Method = 'HEAD'; $req.Timeout = 4000; $req.GetResponse().Close(); return $true }
@@ -344,6 +367,18 @@ if (-not (Test-Path $iniPath)) {
 } else {
     Write-Log '保留现有 screenagent.ini（InstanceId、迁移地址和画质状态不变）' 'WARN'
 }
+$explicitServer = $isFirstInstall -or [bool]$env:SA_SERVER_IP -or [bool]$env:SA_SERVER_PORT -or
+    ($null -ne $env:SA_SERVER_PASSWORD) -or [bool]$env:CAM_SERVER_PROTOCOL -or
+    ($null -ne $env:CAM_SERVER_FINGERPRINT)
+if ($explicitServer) {
+    Set-IniValuePreserve $iniPath 'Server' 'Host' $h
+    Set-IniValuePreserve $iniPath 'Server' 'Port' ([string]$p)
+    Set-IniValuePreserve $iniPath 'Server' 'Password' $w
+    Set-IniValuePreserve $iniPath 'Server' 'Protocol' $ServerProtocol
+    Set-IniValuePreserve $iniPath 'Server' 'CertificateFingerprint' $CertificateFingerprint
+    Write-Log "Applied endpoint to existing screenagent.ini: $ServerProtocol $h`:$p (identity preserved)" 'WARN'
+}
+if ($env:CAM_DELIVERY_BASE) { Set-IniValuePreserve $iniPath 'Bootstrap' 'ConfigUrl' $env:CAM_DELIVERY_BASE.TrimEnd('/') }
 
 # ── Create the scheduled task (logon + HIGHEST privilege) ───────────────────
 #  Two modes:
@@ -408,7 +443,7 @@ if ($needsHandover) {
     if (-not (Wait-ReadyFile -Path $candidateReady)) {
         Unregister-ScheduledTask -TaskName $handoverTask -Confirm:$false -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
-        Fail '候选 ScreenAgent 未完成认证；旧任务和旧进程保持不变' 40
+        Fail "Screen candidate did not receive Server handover confirmation. Old task remains. Check Server >= 1.12 and endpoint settings in $iniPath" 40
     }
     $action = New-ScheduledTaskAction -Execute $candidateExe `
         -Argument ('-handover-ready "{0}" -run' -f $serviceReady) `
@@ -438,7 +473,7 @@ if ($needsHandover) {
         Register-ScheduledTask -TaskName $TaskName -Xml $oldTaskXml -Force | Out-Null
         Start-ScheduledTask -TaskName $TaskName
         Unregister-ScheduledTask -TaskName $handoverTask -Confirm:$false -ErrorAction SilentlyContinue
-        Fail '新 ScreenAgent 主任务未上线；已回滚旧任务' 41
+        Fail "New ScreenAgent task did not authenticate; restored old task. Check $iniPath" 41
     }
     Unregister-ScheduledTask -TaskName $handoverTask -Confirm:$false -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue

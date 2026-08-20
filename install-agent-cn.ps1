@@ -80,6 +80,38 @@ function Get-FileSha256 {
     return (Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLower()
 }
 
+# Update one INI key without replacing the file. This preserves InstanceId,
+# migration rollback state and media settings while applying an endpoint
+# explicitly supplied by the delivery website.
+function Set-IniValuePreserve {
+    param([string]$Path,[string]$Section,[string]$Key,[string]$Value)
+    $lines = [System.Collections.Generic.List[string]]::new()
+    if (Test-Path -LiteralPath $Path) {
+        foreach ($line in (Get-Content -LiteralPath $Path)) { [void]$lines.Add([string]$line) }
+    }
+    $sectionStart = -1
+    $sectionEnd = $lines.Count
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^\s*\[([^]]+)\]\s*$') {
+            if ($sectionStart -ge 0) { $sectionEnd = $i; break }
+            if ($Matches[1] -ieq $Section) { $sectionStart = $i }
+        }
+    }
+    if ($sectionStart -lt 0) {
+        if ($lines.Count -gt 0 -and $lines[$lines.Count - 1] -ne '') { [void]$lines.Add('') }
+        [void]$lines.Add("[$Section]")
+        [void]$lines.Add("$Key=$Value")
+    } else {
+        $keyIndex = -1
+        for ($i = $sectionStart + 1; $i -lt $sectionEnd; $i++) {
+            if ($lines[$i] -match ('^\s*' + [regex]::Escape($Key) + '\s*=')) { $keyIndex = $i; break }
+        }
+        if ($keyIndex -ge 0) { $lines[$keyIndex] = "$Key=$Value" }
+        else { $lines.Insert($sectionEnd, "$Key=$Value") }
+    }
+    Set-Content -LiteralPath $Path -Value $lines -Encoding ASCII
+}
+
 function Test-SourceReachable {
     param([string]$Url)
     try {
@@ -230,6 +262,12 @@ if (-not (Test-Path $candidateExe)) {
 # ---------- 首次安装 (Agent.exe -install 注册服务) ----------
 # ---------- Write/repair Camera Agent server config ----------
 $iniPath = Join-Path $InstallDir 'agent.ini'
+$explicitServer = $isFirstInstall -or $PSBoundParameters.ContainsKey('ServerIp') -or
+    $PSBoundParameters.ContainsKey('ServerPort') -or $PSBoundParameters.ContainsKey('ServerPassword') -or
+    $PSBoundParameters.ContainsKey('ServerProtocol') -or $PSBoundParameters.ContainsKey('CertificateFingerprint') -or
+    [bool]$env:AGENT_SERVER_IP -or [bool]$env:AGENT_SERVER_PORT -or
+    ($null -ne $env:AGENT_SERVER_PASSWORD) -or [bool]$env:CAM_SERVER_PROTOCOL -or
+    ($null -ne $env:CAM_SERVER_FINGERPRINT)
 if (-not (Test-Path $iniPath)) {
     $h = if ($ServerIp) { $ServerIp } else { 'sx1.jc116.com' }
     $p = if ($ServerPort -gt 0) { $ServerPort } else { 9999 }
@@ -268,6 +306,23 @@ Height=1080
 "@
     Set-Content -Path $iniPath -Value $iniContent -Encoding ASCII
     Write-Log "写入 agent.ini: Host=$h Port=$p" 'WARN'
+}
+if ($explicitServer) {
+    $h = if ($ServerIp) { $ServerIp } else { 'sx1.jc116.com' }
+    $p = if ($ServerPort -gt 0) { $ServerPort } else { 9999 }
+    $w = if ($null -ne $ServerPassword) { $ServerPassword } else { '' }
+    $transport = $ServerProtocol.ToLowerInvariant()
+    $pin = ($CertificateFingerprint -replace '[^0-9a-fA-F]','').ToLowerInvariant()
+    if ($transport -eq 'tls' -and $pin.Length -ne 64) { throw 'TLS requires CAM_SERVER_FINGERPRINT (64 hexadecimal SHA-256 characters)' }
+    Set-IniValuePreserve $iniPath 'Server' 'Host' $h
+    Set-IniValuePreserve $iniPath 'Server' 'Port' ([string]$p)
+    Set-IniValuePreserve $iniPath 'Server' 'Password' $w
+    Set-IniValuePreserve $iniPath 'Server' 'Protocol' $transport
+    Set-IniValuePreserve $iniPath 'Server' 'CertificateFingerprint' $pin
+    Write-Log "Applied endpoint to existing agent.ini: $transport $h`:$p (identity preserved)" 'WARN'
+}
+if ($env:CAM_DELIVERY_BASE) {
+    Set-IniValuePreserve $iniPath 'Bootstrap' 'ConfigUrl' $env:CAM_DELIVERY_BASE.TrimEnd('/')
 }
 
 if ($isFirstInstall) {
@@ -312,7 +367,7 @@ if ($needsHandover) {
     if (-not (Wait-ReadyFile -Path $candidateReady)) {
         Stop-Process -Id $candidate.Id -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
-        Write-Log '候选进程未完成认证，旧服务继续运行，升级已回滚' 'ERROR'
+        Write-Log "Candidate did not receive Server handover confirmation. Old service is still running. Check Server >= 1.12, endpoint/protocol/port/password, and TLS fingerprint in $iniPath" 'ERROR'
         exit 5
     }
 
@@ -332,7 +387,7 @@ if ($needsHandover) {
         Start-Service -Name $svcName
         Stop-Process -Id $candidate.Id -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
-        Write-Log '新服务未完成认证，已恢复旧服务路径' 'ERROR'
+        Write-Log "New service did not authenticate; restored the old service path. Check endpoint and Server >= 1.12 in $iniPath" 'ERROR'
         exit 7
     }
     try { $candidate | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue } catch {}
