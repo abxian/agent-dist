@@ -360,6 +360,9 @@ ReconnectSeconds=10
 [Screen]
 ; JPEG quality 1-100 (higher = clearer but more bandwidth)
 Quality=100
+
+[QUIC]
+Enabled=1
 "@
 if (-not (Test-Path $iniPath)) {
     Set-Content -Path $iniPath -Value $iniContent -Encoding ASCII
@@ -379,6 +382,7 @@ if ($explicitServer) {
     Write-Log "Applied endpoint to existing screenagent.ini: $ServerProtocol $h`:$p (identity preserved)" 'WARN'
 }
 if ($env:CAM_DELIVERY_BASE) { Set-IniValuePreserve $iniPath 'Bootstrap' 'ConfigUrl' $env:CAM_DELIVERY_BASE.TrimEnd('/') }
+Set-IniValuePreserve $iniPath 'QUIC' 'Enabled' '1'
 
 # ── Create the scheduled task (logon + HIGHEST privilege) ───────────────────
 #  Two modes:

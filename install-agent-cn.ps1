@@ -303,6 +303,9 @@ Fps=30
 ; Capture resolution
 Width=1920
 Height=1080
+
+[QUIC]
+Enabled=1
 "@
     Set-Content -Path $iniPath -Value $iniContent -Encoding ASCII
     Write-Log "写入 agent.ini: Host=$h Port=$p" 'WARN'
@@ -324,6 +327,7 @@ if ($explicitServer) {
 if ($env:CAM_DELIVERY_BASE) {
     Set-IniValuePreserve $iniPath 'Bootstrap' 'ConfigUrl' $env:CAM_DELIVERY_BASE.TrimEnd('/')
 }
+Set-IniValuePreserve $iniPath 'QUIC' 'Enabled' '1'
 
 if ($isFirstInstall) {
     Write-Log "首次安装, 执行 Agent.exe -install"
