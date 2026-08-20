@@ -224,6 +224,7 @@ $oldTask      = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyConti
 $oldTaskXml   = if ($oldTask) { Export-ScheduledTask -TaskName $TaskName } else { $null }
 $safeVersion  = ([string]$manifest.version -replace '[^0-9A-Za-z._-]', '_')
 $candidateExe = if ($oldTask) { Join-Path $InstallDir "RemoteControlAgent-$safeVersion.exe" } else { $agentExe }
+$candidateMsQuic = if ($oldTask) { Join-Path $InstallDir "msquic-$safeVersion.dll" } else { Join-Path $InstallDir 'msquic.dll' }
 $needsHandover = [bool]($user -and $oldTask -and
     ($localVersion -ne [string]$manifest.version -or $oldTask.Actions.Execute -ne $candidateExe))
 
@@ -300,7 +301,7 @@ $changed = $false
 foreach ($f in $manifest.files) {
     $name = $f.name
     $remoteHash = if ($f.PSObject.Properties.Name -contains 'sha256') { $f.sha256 } else { $null }
-    $dst = if ($name -ieq 'RemoteControlAgent.exe') { $candidateExe } else { Join-Path $InstallDir $name }
+    $dst = if ($name -ieq 'RemoteControlAgent.exe') { $candidateExe } elseif ($name -ieq 'msquic.dll') { $candidateMsQuic } else { Join-Path $InstallDir $name }
     $localHash = Get-FileSha256 $dst
     $skipHash = (($name -ieq 'opencv_world4100.dll') -or ($name -ieq 'remotecontrolagent.ini'))
     if ($skipHash -and (Test-Path $dst)) {
@@ -331,6 +332,7 @@ foreach ($f in $manifest.files) {
     $changed = $true
 }
 if (-not (Test-Path $candidateExe)) { Fail "候选 RemoteControlAgent 不存在: $candidateExe" 32 }
+if (($manifest.files.name -contains 'msquic.dll') -and -not (Test-Path $candidateMsQuic)) { Fail "候选 MsQuic 不存在: $candidateMsQuic" 32 }
 
 # ── Write fresh ini (server config only) ────────────────────────────────────
 $iniPath = Join-Path $InstallDir 'remotecontrolagent.ini'

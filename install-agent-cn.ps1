@@ -189,6 +189,7 @@ $existingService = Get-CimInstance Win32_Service -Filter "Name='$svcName'" -Erro
 $isFirstInstall = -not $existingService
 $safeVersion = ([string]$manifest.version -replace '[^0-9A-Za-z._-]', '_')
 $candidateExe = if ($isFirstInstall) { $agentExe } else { Join-Path $InstallDir "Agent-$safeVersion.exe" }
+$candidateMsQuic = if ($isFirstInstall) { Join-Path $InstallDir 'msquic.dll' } else { Join-Path $InstallDir "msquic-$safeVersion.dll" }
 $oldServicePath = if ($existingService) { [string]$existingService.PathName } else { '' }
 $needsHandover = (-not $isFirstInstall) -and ($localVersion -ne [string]$manifest.version -or
     $oldServicePath -notlike "*$candidateExe*")
@@ -200,7 +201,7 @@ foreach ($f in $manifest.files) {
     $remoteHash = if ($f.PSObject.Properties.Name -contains 'sha256') { $f.sha256 } else { $null }
     # Never overwrite a loaded image. Upgrades are staged side-by-side and
     # become active only after the candidate has authenticated successfully.
-    $dst = if ($name -ieq 'Agent.exe') { $candidateExe } else { Join-Path $InstallDir $name }
+    $dst = if ($name -ieq 'Agent.exe') { $candidateExe } elseif ($name -ieq 'msquic.dll') { $candidateMsQuic } else { Join-Path $InstallDir $name }
     $localHash = Get-FileSha256 $dst
 
     # Only Agent.exe is release-critical. Keep local agent.ini and OpenCV DLL
@@ -258,6 +259,10 @@ foreach ($f in $manifest.files) {
 
 if (-not (Test-Path $candidateExe)) {
     Write-Log "候选 Agent 不存在, 安装失败: $candidateExe" 'ERROR'
+    exit 3
+}
+if (($manifest.files.name -contains 'msquic.dll') -and -not (Test-Path $candidateMsQuic)) {
+    Write-Log "候选 MsQuic 不存在, 安装失败: $candidateMsQuic" 'ERROR'
     exit 3
 }
 
