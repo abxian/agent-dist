@@ -161,23 +161,16 @@ ScreenAgent.exe -start   # 或 sc start RemoteScreenAgent
 
 ---
 
-## 🔄 开机自动检查更新(可选)
+## 🔄 网站拉取更新与无感交接
 
-在客户端机器上执行一次,以后每次开机静默自动升级:
+Agent 从本地 INI 的 `[Update]` 区读取三端各自的版本清单、安装脚本
+URL 与 SHA-256。只接受 HTTPS（本机回环 HTTP 例外），发现更高版本且
+脚本校验通过后自行执行安装器。Server 不再负责加载升级包、推送升级
+或自动推送；迁移 Server 地址的功能继续保留。
 
-**Agent:**
-```powershell
-schtasks /Create /SC ONSTART /TN AgentAutoUpdate /TR "powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command \"iex (irm http://114.80.36.225:15667/6/install-agent-cn.ps1)\"" /RU SYSTEM /F
-```
-
-**ScreenAgent:**
-```powershell
-schtasks /Create /SC ONSTART /TN ScreenAgentAutoUpdate /TR "powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command \"iex (irm http://114.80.36.225:15667/6/install-screenagent-cn.ps1)\"" /RU SYSTEM /F
-```
-
-取消:`schtasks /Delete /TN AgentAutoUpdate /F`(或 `ScreenAgentAutoUpdate`)。
-
-> 注:Server 端本身也支持**推式热升级**(MSG_VERSION/CMD_UPDATE_PUSH 协议)。Server 对话框里 "Stage Update..." + "Auto" 勾上之后,新 Agent 一连上来就会被自动推最新 exe,无需等到下次开机。两个机制互补。
+安装器采用新旧进程蓝绿交接：候选进程先以相同 `InstanceId` 登录，
+等待 Server 完成画面、麦克风、录制与编码参数迁移并返回 ready，再切换
+Windows 服务/计划任务。候选失败或正式进程未上线时自动回滚旧路径。
 
 ---
 

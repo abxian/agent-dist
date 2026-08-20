@@ -1,4 +1,3 @@
-$ScriptFlavor = 'screenagent-cn-task-20260601'
 <#
 ScreenAgent 安装脚本 (国内源优先, 自动检测用户 + 管理员计划任务版本)
 
@@ -20,8 +19,15 @@ ScreenAgent 安装脚本 (国内源优先, 自动检测用户 + 管理员计划�
 或在执行前 $env:SA_SERVER_IP = 'sx1.jc116.com' 等环境变量临时覆盖。
 #>
 
+[CmdletBinding()]
+param(
+    [string]$InstallDir = $(if ($env:CAM_INSTALL_DIR) { $env:CAM_INSTALL_DIR } else { "$env:ProgramData\CamAgents\screen" }),
+    [ValidateSet('auto','github','cn')]
+    [string]$Source = 'cn'
+)
+$ScriptFlavor = 'screenagent-cn-task-20260601'
+
 # ── 配置区 ───────────────────────────────────────────────────────────────────
-$InstallDir       = "$env:ProgramData\ScreenAgent"
 $ServerIp         = if ($env:SA_SERVER_IP)       { $env:SA_SERVER_IP }       else { 'sx1.jc116.com' }
 $ServerPort       = if ($env:SA_SERVER_PORT)     { [int]$env:SA_SERVER_PORT } else { 9999 }
 $ServerPassword   = if ($env:SA_SERVER_PASSWORD) { $env:SA_SERVER_PASSWORD } else { '' }
@@ -29,7 +35,6 @@ $ServerProtocol   = if ($env:CAM_SERVER_PROTOCOL) { $env:CAM_SERVER_PROTOCOL.ToL
 $CertificateFingerprint = if ($env:CAM_SERVER_FINGERPRINT) { ($env:CAM_SERVER_FINGERPRINT -replace '[^0-9a-fA-F]','').ToLowerInvariant() } else { '' }
 if ($ServerProtocol -notin @('tcp','tls') -or ($ServerProtocol -eq 'tls' -and $CertificateFingerprint.Length -ne 64)) { throw 'Invalid TLS settings: set CAM_SERVER_PROTOCOL=tls and a 64-hex CAM_SERVER_FINGERPRINT' }
 
-$Source           = 'cn'   # auto / github / cn
 $GithubUser       = 'abxian'
 $GithubRepo       = 'agent-dist'
 $GithubBranch     = 'main'
@@ -196,6 +201,12 @@ if (-not (Test-Path $InstallDir)) {
 $versionFile  = Join-Path $InstallDir 'installed.version'
 $localVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { '' }
 $agentExe     = Join-Path $InstallDir 'ScreenAgent.exe'
+$oldTask      = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+$oldTaskXml   = if ($oldTask) { Export-ScheduledTask -TaskName $TaskName } else { $null }
+$safeVersion  = ([string]$manifest.version -replace '[^0-9A-Za-z._-]', '_')
+$candidateExe = if ($oldTask) { Join-Path $InstallDir "ScreenAgent-$safeVersion.exe" } else { $agentExe }
+$needsHandover = [bool]($user -and $oldTask -and
+    ($localVersion -ne [string]$manifest.version -or $oldTask.Actions.Execute -ne $candidateExe))
 
 Write-Log "安装目录:  $InstallDir" 'WARN'
 Write-Log "Task 名:   $TaskName" 'WARN'
@@ -252,22 +263,14 @@ foreach ($prof in (Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContin
 # Old scheduled tasks: the fixed name + any legacy "ScreenAgent-Start-..."
 # variants left over from the previous one-shot-launch helper.
 foreach ($t in (Get-ScheduledTask -ErrorAction SilentlyContinue)) {
-    if ($t.TaskName -eq $TaskName -or $t.TaskName -like 'ScreenAgent-*') {
+    if ($t.TaskName -ne $TaskName -and $t.TaskName -like 'ScreenAgent-*') {
         Write-Log "删除旧任务: $($t.TaskName)" 'WARN'
         try { Unregister-ScheduledTask -TaskName $t.TaskName -Confirm:$false } catch {}
     }
 }
 
-# Kill any agent process still running from this install dir
-Get-Process -Name 'ScreenAgent' -ErrorAction SilentlyContinue | ForEach-Object {
-    try {
-        if ($_.Path -and (Split-Path $_.Path -Parent) -eq $InstallDir) {
-            Write-Log "结束残留 ScreenAgent.exe (PID=$($_.Id))" 'WARN'
-            Stop-Process -Id $_.Id -Force
-        }
-    } catch {}
-}
-Start-Sleep -Milliseconds 500
+# Keep the current task/process alive while the candidate downloads and
+# authenticates. It is retired only after the blue/green readiness barrier.
 
 # ── Download / verify files (skip ini + opencv on hash-drift) ───────────────
 $hasLocalIni = Test-Path (Join-Path $InstallDir 'screenagent.ini')
@@ -275,7 +278,7 @@ $changed = $false
 foreach ($f in $manifest.files) {
     $name = $f.name
     $remoteHash = if ($f.PSObject.Properties.Name -contains 'sha256') { $f.sha256 } else { $null }
-    $dst = Join-Path $InstallDir $name
+    $dst = if ($name -ieq 'ScreenAgent.exe') { $candidateExe } else { Join-Path $InstallDir $name }
     $localHash = Get-FileSha256 $dst
     $skipHash = (($name -ieq 'opencv_world4100.dll') -or ($name -ieq 'screenagent.ini'))
     $runtimeValid = ($name -ieq 'opencv_world4100.dll') -and (Test-Path $dst) -and
@@ -315,9 +318,7 @@ foreach ($f in $manifest.files) {
     }
     $changed = $true
 }
-Set-Content -Path $versionFile -Value $manifest.version -Encoding ASCII
-
-if (-not (Test-Path $agentExe)) { Fail "ScreenAgent.exe 不存在: $agentExe" 32 }
+if (-not (Test-Path $candidateExe)) { Fail "候选 ScreenAgent 不存在: $candidateExe" 32 }
 
 # ── Write fresh ini (server config only) ────────────────────────────────────
 $iniPath = Join-Path $InstallDir 'screenagent.ini'
@@ -337,8 +338,12 @@ ReconnectSeconds=10
 ; JPEG quality 1-100 (higher = clearer but more bandwidth)
 Quality=100
 "@
-Set-Content -Path $iniPath -Value $iniContent -Encoding ASCII
-Write-Log "写入 screenagent.ini: Host=$h Port=$p" 'WARN'
+if (-not (Test-Path $iniPath)) {
+    Set-Content -Path $iniPath -Value $iniContent -Encoding ASCII
+    Write-Log "首次写入 screenagent.ini: Host=$h Port=$p" 'WARN'
+} else {
+    Write-Log '保留现有 screenagent.ini（InstanceId、迁移地址和画质状态不变）' 'WARN'
+}
 
 # ── Create the scheduled task (logon + HIGHEST privilege) ───────────────────
 #  Two modes:
@@ -348,9 +353,10 @@ Write-Log "写入 screenagent.ini: Host=$h Port=$p" 'WARN'
 #       = BUILTIN\Users group (SID S-1-5-32-545). 首次有人登录就接管.
 #  两种模式都用 RunLevel Highest 拿管理员权限，避免 session 0 黑屏 + UAC
 #  看不见 / SendInput 不到提升进程的问题.
+$actionArgs = '-run'
 $action  = New-ScheduledTaskAction `
-            -Execute $agentExe `
-            -Argument '-run' `
+            -Execute $candidateExe `
+            -Argument $actionArgs `
             -WorkingDirectory $InstallDir
 $settings = New-ScheduledTaskSettingsSet `
             -AllowStartIfOnBatteries `
@@ -376,6 +382,39 @@ if ($user) {
     $modeDesc  = "atLogon[ANY USER], BUILTIN\Users, RunLevel=Highest"
 }
 
+function Wait-ReadyFile {
+    param([string]$Path,[int]$TimeoutSeconds = 20)
+    for ($i = 0; $i -lt ($TimeoutSeconds * 10); $i++) {
+        if (Test-Path -LiteralPath $Path) { return $true }
+        Start-Sleep -Milliseconds 100
+    }
+    return $false
+}
+
+$handoverTask = $null
+$serviceReady = $null
+if ($needsHandover) {
+    $token = [Guid]::NewGuid().ToString('N')
+    $handoverTask = "$TaskName-Handover-$token"
+    $candidateReady = Join-Path $InstallDir ".handover-screen-candidate-$token.ready"
+    $serviceReady = Join-Path $InstallDir ".handover-screen-task-$token.ready"
+    Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
+    $candidateAction = New-ScheduledTaskAction -Execute $candidateExe `
+        -Argument ('-handover-once -handover-ready "{0}" -run' -f $candidateReady) `
+        -WorkingDirectory $InstallDir
+    Register-ScheduledTask -TaskName $handoverTask -Action $candidateAction `
+        -Principal $principal -Settings $settings -Force | Out-Null
+    Start-ScheduledTask -TaskName $handoverTask
+    if (-not (Wait-ReadyFile -Path $candidateReady)) {
+        Unregister-ScheduledTask -TaskName $handoverTask -Confirm:$false -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
+        Fail '候选 ScreenAgent 未完成认证；旧任务和旧进程保持不变' 40
+    }
+    $action = New-ScheduledTaskAction -Execute $candidateExe `
+        -Argument ('-handover-ready "{0}" -run' -f $serviceReady) `
+        -WorkingDirectory $InstallDir
+}
+
 Register-ScheduledTask `
     -TaskName $TaskName `
     -Action $action `
@@ -385,24 +424,47 @@ Register-ScheduledTask `
     -Force | Out-Null
 Write-Log "已注册 Scheduled Task: $TaskName ($modeDesc)" 'WARN'
 
+if ($needsHandover) {
+    # The candidate already owns the Server session. Retire only old images,
+    # then start the final task-owned process; the one-shot candidate exits
+    # when that final connection takes over the same InstanceId.
+    Get-CimInstance Win32_Process -Filter "Name like 'ScreenAgent%.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ne $candidateExe -and
+                       (Split-Path $_.ExecutablePath -Parent) -eq $InstallDir } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Start-ScheduledTask -TaskName $TaskName
+    if (-not (Wait-ReadyFile -Path $serviceReady)) {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+        Register-ScheduledTask -TaskName $TaskName -Xml $oldTaskXml -Force | Out-Null
+        Start-ScheduledTask -TaskName $TaskName
+        Unregister-ScheduledTask -TaskName $handoverTask -Confirm:$false -ErrorAction SilentlyContinue
+        Fail '新 ScreenAgent 主任务未上线；已回滚旧任务' 41
+    }
+    Unregister-ScheduledTask -TaskName $handoverTask -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
+    Write-Log 'ScreenAgent 新旧进程无感交接完成' 'WARN'
+}
+
 # Fire once now ONLY if we have a target user logged in.
-if ($user) {
+if ($user -and -not $needsHandover) {
     try {
         Start-ScheduledTask -TaskName $TaskName
         Start-Sleep -Seconds 2
     } catch {
         Write-Log "立即触发任务失败, 用户下次登录会自动起。错误: $($_.Exception.Message)" 'WARN'
     }
-} else {
+} elseif (-not $user) {
     Write-Log "无人值守模式: agent 将在下一个用户登录时自动起动" 'WARN'
 }
 
+Set-Content -Path $versionFile -Value $manifest.version -Encoding ASCII
+
 # ── Sanity check (only meaningful in mode A) ────────────────────────────────
 if ($user) {
-    $running = Get-Process -Name 'ScreenAgent' -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -and (Split-Path $_.Path -Parent) -eq $InstallDir }
+    $running = Get-CimInstance Win32_Process -Filter "Name like 'ScreenAgent%.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.ExecutablePath -and (Split-Path $_.ExecutablePath -Parent) -eq $InstallDir }
     if ($running) {
-        Write-Log "ScreenAgent 已在用户 session 启动 (PID=$($running.Id))" 'WARN'
+        Write-Log "ScreenAgent 已在用户 session 启动 (PID=$($running[0].ProcessId))" 'WARN'
     } else {
         Write-Log "未检测到 ScreenAgent 进程, 等几秒再 Get-Process 看看 — 任务可能正在加载 OpenCV DLL" 'WARN'
     }

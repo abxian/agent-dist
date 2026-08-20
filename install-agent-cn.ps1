@@ -14,7 +14,7 @@ param(
     [ValidateSet('auto','github','cn')]
     [string]$Source = 'cn',
 
-    [string]$InstallDir = "$env:ProgramData\Agent",
+    [string]$InstallDir = $(if ($env:CAM_INSTALL_DIR) { $env:CAM_INSTALL_DIR } else { "$env:ProgramData\CamAgents\camera" }),
 
     [string]$ServerIp = 'sx1.jc116.com',
     [int]$ServerPort = 9999,
@@ -147,35 +147,26 @@ $localVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Tr
 
 Write-Log "本地版本: '$localVersion'  远端版本: '$($manifest.version)'"
 
-# ---------- 停止正在运行的 Agent (优雅 -stop, 兜底 Stop-Process) ----------
+# ---------- 蓝绿升级目标 ----------
 $agentExe = Join-Path $InstallDir 'Agent.exe'
 $installedMarker = Join-Path $InstallDir '.installed'
-$isFirstInstall = -not (Test-Path $installedMarker)
-
-if (Test-Path $agentExe) {
-    try {
-        Write-Log "执行 Agent.exe -stop"
-        $p = Start-Process -FilePath $agentExe -ArgumentList '-stop' -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru
-        $p | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
-    } catch {}
-}
-# 兜底: 强杀残留进程, 释放文件占用
-Get-Process -Name 'Agent' -ErrorAction SilentlyContinue | ForEach-Object {
-    try {
-        if ($_.Path -and (Split-Path $_.Path -Parent) -eq $InstallDir) {
-            Write-Log "强制结束残留 Agent.exe (PID=$($_.Id))"
-            $_ | Stop-Process -Force
-        }
-    } catch {}
-}
-Start-Sleep -Milliseconds 500
+$svcName = 'RemoteCameraAgent'
+$existingService = Get-CimInstance Win32_Service -Filter "Name='$svcName'" -ErrorAction SilentlyContinue
+$isFirstInstall = -not $existingService
+$safeVersion = ([string]$manifest.version -replace '[^0-9A-Za-z._-]', '_')
+$candidateExe = if ($isFirstInstall) { $agentExe } else { Join-Path $InstallDir "Agent-$safeVersion.exe" }
+$oldServicePath = if ($existingService) { [string]$existingService.PathName } else { '' }
+$needsHandover = (-not $isFirstInstall) -and ($localVersion -ne [string]$manifest.version -or
+    $oldServicePath -notlike "*$candidateExe*")
 
 # ---------- 下载 / 校验 ----------
 $changed = $false
 foreach ($f in $manifest.files) {
     $name = $f.name
     $remoteHash = if ($f.PSObject.Properties.Name -contains 'sha256') { $f.sha256 } else { $null }
-    $dst = Join-Path $InstallDir $name
+    # Never overwrite a loaded image. Upgrades are staged side-by-side and
+    # become active only after the candidate has authenticated successfully.
+    $dst = if ($name -ieq 'Agent.exe') { $candidateExe } else { Join-Path $InstallDir $name }
     $localHash = Get-FileSha256 $dst
 
     # Only Agent.exe is release-critical. Keep local agent.ini and OpenCV DLL
@@ -231,18 +222,15 @@ foreach ($f in $manifest.files) {
     $changed = $true
 }
 
-# ---------- 写入版本 ----------
-Set-Content -Path $versionFile -Value $manifest.version -Encoding ASCII
-
-if (-not (Test-Path $agentExe)) {
-    Write-Log "Agent.exe 不存在, 安装失败" 'ERROR'
+if (-not (Test-Path $candidateExe)) {
+    Write-Log "候选 Agent 不存在, 安装失败: $candidateExe" 'ERROR'
     exit 3
 }
 
 # ---------- 首次安装 (Agent.exe -install 注册服务) ----------
 # ---------- Write/repair Camera Agent server config ----------
 $iniPath = Join-Path $InstallDir 'agent.ini'
-if (($ServerIp -or $ServerPort -gt 0 -or $ServerPassword) -or -not (Test-Path $iniPath)) {
+if (-not (Test-Path $iniPath)) {
     $h = if ($ServerIp) { $ServerIp } else { 'sx1.jc116.com' }
     $p = if ($ServerPort -gt 0) { $ServerPort } else { 9999 }
     $w = if ($ServerPassword) { $ServerPassword } else { '' }
@@ -272,8 +260,8 @@ ReconnectSeconds=10
 Index=0
 ; JPEG quality 1-100  (100=best, still JPEG-compressed)
 Quality=100
-; Frames per second 1-60
-Fps=15
+; Frames per second 1-120 (30 is the realtime default)
+Fps=30
 ; Capture resolution
 Width=1920
 Height=1080
@@ -301,20 +289,61 @@ if ($isFirstInstall) {
     Set-Content -Path $installedMarker -Value (Get-Date -Format 'o') -Encoding ASCII
 }
 
-# ---------- 启动 (Agent.exe -start) ----------
-Write-Log "启动 Agent.exe -start"
-try {
-    $p = Start-Process -FilePath $agentExe -ArgumentList '-start' -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru -Wait
-    if ($p.ExitCode -ne 0) {
-        Write-Log "Agent.exe -start 退出码=$($p.ExitCode)" 'ERROR'
+# ---------- 新旧进程无感交接 ----------
+function Wait-ReadyFile {
+    param([string]$Path,[int]$TimeoutSeconds = 20)
+    for ($i = 0; $i -lt ($TimeoutSeconds * 10); $i++) {
+        if (Test-Path -LiteralPath $Path) { return $true }
+        Start-Sleep -Milliseconds 100
     }
-} catch {
-    Write-Log "Agent.exe -start 启动失败: $($_.Exception.Message)" 'ERROR'
-    exit 5
+    return $false
 }
 
-# ---------- 验证服务真在跑 (轮询 10 秒) ----------
-$svcName = 'RemoteCameraAgent'
+if ($needsHandover) {
+    $token = [Guid]::NewGuid().ToString('N')
+    $candidateReady = Join-Path $InstallDir ".handover-candidate-$token.ready"
+    $serviceReady = Join-Path $InstallDir ".handover-service-$token.ready"
+    Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
+
+    Write-Log "启动候选进程并等待 Server 接管同一 InstanceId" 'WARN'
+    $candidate = Start-Process -FilePath $candidateExe `
+        -ArgumentList @('-handover-once','-handover-ready',$candidateReady,'-run') `
+        -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru
+    if (-not (Wait-ReadyFile -Path $candidateReady)) {
+        Stop-Process -Id $candidate.Id -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
+        Write-Log '候选进程未完成认证，旧服务继续运行，升级已回滚' 'ERROR'
+        exit 5
+    }
+
+    $newServicePath = '"{0}" -handover-ready "{1}"' -f $candidateExe,$serviceReady
+    & sc.exe config $svcName binPath= $newServicePath start= auto | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Stop-Process -Id $candidate.Id -Force -ErrorAction SilentlyContinue
+        Write-Log "无法切换服务路径，旧服务继续运行: $LASTEXITCODE" 'ERROR'
+        exit 6
+    }
+
+    Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
+    Start-Service -Name $svcName
+    if (-not (Wait-ReadyFile -Path $serviceReady)) {
+        Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
+        & sc.exe config $svcName binPath= $oldServicePath start= auto | Out-Null
+        Start-Service -Name $svcName
+        Stop-Process -Id $candidate.Id -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
+        Write-Log '新服务未完成认证，已恢复旧服务路径' 'ERROR'
+        exit 7
+    }
+    try { $candidate | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue } catch {}
+    if (-not $candidate.HasExited) { Stop-Process -Id $candidate.Id -Force -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
+    Write-Log "无感交接完成: $candidateExe" 'WARN'
+} elseif ($isFirstInstall) {
+    Start-Service -Name $svcName
+}
+
+# ---------- 验证服务真在跑 ----------
 $svc = $null
 for ($i = 0; $i -lt 20; $i++) {
     $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
@@ -330,6 +359,9 @@ if ($svc.Status -ne 'Running') {
     Write-Log "排查: Get-EventLog System -Source 'Service Control Manager' -Newest 10" 'ERROR'
     exit 7
 }
+
+# 身份与本地设置存放在原 INI 中；只有交接成功后才提交版本号。
+Set-Content -Path $versionFile -Value $manifest.version -Encoding ASCII
 
 if ($changed) {
     Write-Log "完成: 已更新到版本 $($manifest.version)"
