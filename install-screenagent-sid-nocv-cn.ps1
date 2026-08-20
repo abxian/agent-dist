@@ -474,15 +474,37 @@ Register-ScheduledTask `
 Write-Log "已注册 Scheduled Task: $TaskName ($modeDesc)" 'WARN'
 
 if ($needsHandover) {
-    # The candidate already owns the Server session. Retire only old images,
-    # then start the final task-owned process; the one-shot candidate exits
-    # when that final connection takes over the same InstanceId.
+    # The candidate proved that the new image can authenticate. Retire old
+    # images, then stop the one-shot candidate before starting the permanent
+    # task. Keeping both new processes alive can make them race for the same
+    # InstanceId on slower relays and prevent the permanent task from receiving
+    # its handover confirmation.
     Get-CimInstance Win32_Process -Filter "Name like 'ScreenAgent%.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ne $candidateExe -and
                        (Split-Path $_.ExecutablePath -Parent) -eq $InstallDir } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Stop-ScheduledTask -TaskName $handoverTask -ErrorAction SilentlyContinue
+    for ($i = 0; $i -lt 100; $i++) {
+        $candidateRunning = Get-CimInstance Win32_Process -Filter "Name like 'ScreenAgent%.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath -eq $candidateExe }
+        if (-not $candidateRunning) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    Get-CimInstance Win32_Process -Filter "Name like 'ScreenAgent%.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.ExecutablePath -eq $candidateExe } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Start-ScheduledTask -TaskName $TaskName
     if (-not (Wait-ReadyFile -Path $serviceReady)) {
+        $failedTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        $failedInfo = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
+        $failedPids = @(Get-CimInstance Win32_Process -Filter "Name like 'ScreenAgent%.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath -eq $candidateExe } |
+            ForEach-Object { $_.ProcessId }) -join ','
+        Write-Log "Final ScreenAgent diagnostics: State=$($failedTask.State), LastTaskResult=$($failedInfo.LastTaskResult), PIDs=$failedPids" 'ERROR'
+        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        Get-CimInstance Win32_Process -Filter "Name like 'ScreenAgent%.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath -eq $candidateExe } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
         Register-ScheduledTask -TaskName $TaskName -Xml $oldTaskXml -Force | Out-Null
         Start-ScheduledTask -TaskName $TaskName

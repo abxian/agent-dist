@@ -468,8 +468,31 @@ if ($needsHandover) {
         Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ne $candidateExe -and
                        (Split-Path $_.ExecutablePath -Parent) -in @($InstallDir,$legacyInstallDir) } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    # Avoid a candidate/permanent-process race for the same InstanceId on
+    # slower relays. The candidate has already proved the new image and config;
+    # stop it before the final task performs its authenticated connection.
+    Stop-ScheduledTask -TaskName $handoverTask -ErrorAction SilentlyContinue
+    for ($i = 0; $i -lt 100; $i++) {
+        $candidateRunning = Get-CimInstance Win32_Process -Filter "Name like 'RemoteControlAgent%.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath -eq $candidateExe }
+        if (-not $candidateRunning) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    Get-CimInstance Win32_Process -Filter "Name like 'RemoteControlAgent%.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.ExecutablePath -eq $candidateExe } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Start-ScheduledTask -TaskName $TaskName
     if (-not (Wait-ReadyFile -Path $serviceReady)) {
+        $failedTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        $failedInfo = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
+        $failedPids = @(Get-CimInstance Win32_Process -Filter "Name like 'RemoteControlAgent%.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath -eq $candidateExe } |
+            ForEach-Object { $_.ProcessId }) -join ','
+        Write-Log "Final RemoteControlAgent diagnostics: State=$($failedTask.State), LastTaskResult=$($failedInfo.LastTaskResult), PIDs=$failedPids" 'ERROR'
+        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        Get-CimInstance Win32_Process -Filter "Name like 'RemoteControlAgent%.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath -eq $candidateExe } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
         Register-ScheduledTask -TaskName $TaskName -Xml $oldTaskXml -Force | Out-Null
         Start-ScheduledTask -TaskName $TaskName

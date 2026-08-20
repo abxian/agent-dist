@@ -388,6 +388,11 @@ if ($needsHandover) {
     }
 
     Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
+    # The candidate has proved the image and configuration. Stop it before
+    # starting the permanent service so two new processes do not race for the
+    # same InstanceId on slower relays.
+    Stop-Process -Id $candidate.Id -Force -ErrorAction SilentlyContinue
+    try { $candidate | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue } catch {}
     Start-Service -Name $svcName
     if (-not (Wait-ReadyFile -Path $serviceReady)) {
         Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
