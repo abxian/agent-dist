@@ -238,26 +238,30 @@ $oldTaskXml   = if ($oldTask) { Export-ScheduledTask -TaskName $TaskName } else 
 $oldTaskExecute = if ($oldTask) { [string](@($oldTask.Actions)[0].Execute) } else { '' }
 $oldTaskArguments = if ($oldTask) { [string](@($oldTask.Actions)[0].Arguments) } else { '' }
 $safeVersion  = ([string]$manifest.version -replace '[^0-9A-Za-z._-]', '_')
-$candidateExe = if ($oldTask) { Join-Path $InstallDir "ScreenAgent-$safeVersion.exe" } else { $agentExe }
-$candidateMsQuic = if ($oldTask) { Join-Path $InstallDir "msquic-$safeVersion.dll" } else { Join-Path $InstallDir 'msquic.dll' }
-$runningLegacyImage = Get-CimInstance Win32_Process -Filter "Name like 'ScreenAgent%.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ne $candidateExe -and
-                   (Split-Path $_.ExecutablePath -Parent) -eq $InstallDir } |
-    Select-Object -First 1
+$allRunningImages = @(Get-CimInstance Win32_Process -Filter "Name like 'ScreenAgent%.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.ExecutablePath -and (Split-Path $_.ExecutablePath -Parent) -eq $InstallDir })
+$existingRuntime = $allRunningImages | Select-Object -First 1
+$hasExistingRuntime = [bool]($oldTask -or $existingRuntime)
+$candidateExe = if ($hasExistingRuntime) { Join-Path $InstallDir "ScreenAgent-$safeVersion.exe" } else { $agentExe }
+$candidateMsQuic = if ($hasExistingRuntime) { Join-Path $InstallDir "msquic-$safeVersion.dll" } else { Join-Path $InstallDir 'msquic.dll' }
+$runningLegacyImage = $allRunningImages | Where-Object { $_.ExecutablePath -ne $candidateExe } | Select-Object -First 1
+$oldRuntimeExecute = if ($existingRuntime) { [string]$existingRuntime.ExecutablePath } else { $oldTaskExecute }
 $taskExePath = if ($oldTask) { [string](@($oldTask.Actions)[0].Execute) } else { '' }
-$actualVersion = if ((Split-Path $taskExePath -Leaf) -match '-v?([0-9]+(?:\.[0-9]+){1,3})\.exe$') { $Matches[1] } elseif (Test-Path -LiteralPath $taskExePath) { (([Diagnostics.FileVersionInfo]::GetVersionInfo($taskExePath).ProductVersion -replace ',','.').TrimEnd('.0')) } else { '' }
+$activeExePath = if ($existingRuntime) { [string]$existingRuntime.ExecutablePath } else { $taskExePath }
+$actualVersion = if ($activeExePath -and (Split-Path $activeExePath -Leaf) -match '-v?([0-9]+(?:\.[0-9]+){1,3})\.exe$') { $Matches[1] } elseif ($activeExePath -and (Test-Path -LiteralPath $activeExePath)) { (([Diagnostics.FileVersionInfo]::GetVersionInfo($activeExePath).ProductVersion -replace ',','.').TrimEnd('.0')) } else { '' }
 $remoteExe = @($manifest.files | Where-Object { $_.name -ieq 'ScreenAgent.exe' } | Select-Object -First 1)
 $remoteExeHash = if ($remoteExe -and $remoteExe[0].sha256) { ([string]$remoteExe[0].sha256).ToLower() } else { '' }
-$activeHash = if (Test-Path -LiteralPath $taskExePath) { Get-FileSha256 $taskExePath } else { '' }
+$activeHash = if ($activeExePath -and (Test-Path -LiteralPath $activeExePath)) { Get-FileSha256 $activeExePath } else { '' }
 $activeIsCurrent = [bool](($remoteExeHash -and $activeHash -eq $remoteExeHash) -or (-not $remoteExeHash -and $actualVersion -eq ([string]$manifest.version).TrimStart('v')))
 try {
     if ($actualVersion -and ([version]$actualVersion -gt [version](([string]$manifest.version).TrimStart('v')))) {
         Fail "Refusing stale manifest downgrade: active=$actualVersion manifest=$($manifest.version) source=$chosen" 8
     }
 } catch [System.Management.Automation.PipelineStoppedException] { throw } catch {}
-$needsHandover = [bool]($user -and $oldTask -and
+$needsHandover = [bool]($user -and $hasExistingRuntime -and
     (-not $activeIsCurrent -or $runningLegacyImage))
-Write-Log "Detected state: task=$($oldTask.State) path='$taskExePath' actual='$actualVersion' marker='$localVersion' current=$activeIsCurrent runningLegacy=$([bool]$runningLegacyImage)" 'WARN'
+$installState = if (-not $hasExistingRuntime) { 'first-install' } elseif ($activeIsCurrent -and $existingRuntime) { 'current' } elseif ($activeIsCurrent) { 'repair-start' } else { 'upgrade' }
+Write-Log "Detected state: mode=$installState task=$($oldTask.State) configured='$taskExePath' running='$($existingRuntime.ExecutablePath)' actual='$actualVersion' marker='$localVersion' current=$activeIsCurrent" 'WARN'
 
 Write-Log "安装目录:  $InstallDir" 'WARN'
 Write-Log "Task 名:   $TaskName" 'WARN'
@@ -557,10 +561,18 @@ if ($needsHandover) {
             Where-Object { $_.ExecutablePath -eq $candidateExe } |
             ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-        Register-ScheduledTask -TaskName $TaskName -Xml $oldTaskXml -Force | Out-Null
-        if ($runCandidateDirect -and $oldTaskExecute) {
-            Start-Process -FilePath $oldTaskExecute -ArgumentList $oldTaskArguments `
-                -WorkingDirectory (Split-Path $oldTaskExecute -Parent) -WindowStyle Hidden | Out-Null
+        if ($oldTaskXml) {
+            Register-ScheduledTask -TaskName $TaskName -Xml $oldTaskXml -Force | Out-Null
+        } elseif ($oldRuntimeExecute) {
+            $rollbackAction = New-ScheduledTaskAction -Execute $oldRuntimeExecute -Argument '-run' `
+                -WorkingDirectory (Split-Path $oldRuntimeExecute -Parent)
+            Register-ScheduledTask -TaskName $TaskName -Action $rollbackAction -Trigger $trigger `
+                -Principal $principal -Settings $settings -Force | Out-Null
+        }
+        if ($runCandidateDirect -and $oldRuntimeExecute) {
+            $rollbackArguments = if ($oldTaskArguments) { $oldTaskArguments } else { '-run' }
+            Start-Process -FilePath $oldRuntimeExecute -ArgumentList $rollbackArguments `
+                -WorkingDirectory (Split-Path $oldRuntimeExecute -Parent) -WindowStyle Hidden | Out-Null
         } else {
             Start-ScheduledTask -TaskName $TaskName
         }

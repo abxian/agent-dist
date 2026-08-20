@@ -228,7 +228,8 @@ try {
         exit 8
     }
 } catch [System.Management.Automation.PipelineStoppedException] { throw } catch {}
-Write-Log "Detected state: service=$($existingService.State) configured='$serviceExePath' running='$runningExePath' actual='$actualVersion' marker='$localVersion' current=$activeIsCurrent" 'WARN'
+$installState = if ($isFirstInstall) { 'first-install' } elseif ($activeIsCurrent -and $existingService.State -eq 'Running') { 'current' } elseif ($activeIsCurrent) { 'repair-start' } elseif (Test-Path -LiteralPath $activeExePath) { 'upgrade' } else { 'repair-broken' }
+Write-Log "Detected state: mode=$installState service=$($existingService.State) configured='$serviceExePath' running='$runningExePath' actual='$actualVersion' marker='$localVersion' current=$activeIsCurrent" 'WARN'
 
 # ---------- 下载 / 校验 ----------
 $changed = $false
@@ -459,6 +460,9 @@ if ($needsHandover) {
     Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
     Write-Log "无感交接完成: $candidateExe" 'WARN'
 } elseif ($isFirstInstall) {
+    Start-Service -Name $svcName
+} elseif ($existingService.State -ne 'Running') {
+    Write-Log "服务存在但未运行，执行修复启动: $($existingService.State)" 'WARN'
     Start-Service -Name $svcName
 }
 
