@@ -33,16 +33,31 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$script:InstallLogPath = $null
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls
 
 # ---------- 基础工具 ----------
 function Write-Log {
     param([string]$Msg,[string]$Level='INFO')
-    # 静默模式: 只显示 WARN / ERROR
-    if ($VerbosePreference -eq 'SilentlyContinue' -and $Level -ne 'ERROR') { return }
     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $line = "[$ts][$Level] $Msg"
+    if ($script:InstallLogPath) {
+        try { Add-Content -LiteralPath $script:InstallLogPath -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue } catch {}
+    }
+    # 静默模式: 仍显示 WARN / ERROR，自动更新失败时必须有下文。
+    if ($VerbosePreference -eq 'SilentlyContinue' -and $Level -eq 'INFO') { return }
     $color = switch ($Level) { 'ERROR' { 'Red' } 'WARN' { 'Yellow' } default { 'Gray' } }
-    Write-Host "[$ts][$Level] $Msg" -ForegroundColor $color
+    Write-Host $line -ForegroundColor $color
+}
+
+function Get-ExecutableVersion {
+    param([string]$Path)
+    if (-not $Path) { return '' }
+    if ((Split-Path $Path -Leaf) -match '-v?([0-9]+(?:\.[0-9]+){1,3})\.exe$') { return $Matches[1] }
+    if (Test-Path -LiteralPath $Path) {
+        try { return (([Diagnostics.FileVersionInfo]::GetVersionInfo($Path).ProductVersion -replace ',','.').TrimEnd('.0')) } catch {}
+    }
+    return ''
 }
 
 function Get-RemoteFile {
@@ -133,8 +148,8 @@ function Resolve-Source {
     param([string]$Preferred)
     if ($Preferred -ne 'auto') { return $Preferred }
     Write-Log "自动检测最佳源..."
-    if (Test-SourceReachable "$githubRaw/version.json") { return 'github' }
     if (Test-SourceReachable "$CnBase/version.json")    { return 'cn' }
+    if (Test-SourceReachable "$githubRaw/version.json") { return 'github' }
     # 都无清单时 fallback 到 cn (原始链接)
     return 'cn'
 }
@@ -154,6 +169,7 @@ Write-Log "使用源: $chosen ($base)"
 # }
 $manifestUrl = "$base/version.json"
 $manifestRaw = Get-RemoteString $manifestUrl
+$manifestRaw = if ($manifestRaw) { $manifestRaw.TrimStart([char]0xFEFF) } else { $manifestRaw }
 
 $defaultFiles = @('Agent.exe','agent.ini','opencv_world4100.dll')
 $manifest = $null
@@ -173,6 +189,8 @@ if (-not $manifest) {
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
+$script:InstallLogPath = Join-Path $InstallDir 'install-agent.log'
+Write-Log "==== installer start: source=$chosen manifest=$manifestUrl ====" 'WARN'
 $versionFile = Join-Path $InstallDir 'installed.version'
 $localVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { '' }
 
@@ -188,8 +206,29 @@ $safeVersion = ([string]$manifest.version -replace '[^0-9A-Za-z._-]', '_')
 $candidateExe = if ($isFirstInstall) { $agentExe } else { Join-Path $InstallDir "Agent-$safeVersion.exe" }
 $candidateMsQuic = if ($isFirstInstall) { Join-Path $InstallDir 'msquic.dll' } else { Join-Path $InstallDir "msquic-$safeVersion.dll" }
 $oldServicePath = if ($existingService) { [string]$existingService.PathName } else { '' }
-$needsHandover = (-not $isFirstInstall) -and ($localVersion -ne [string]$manifest.version -or
-    $oldServicePath -notlike "*$candidateExe*")
+$serviceExePath = ''
+if ($oldServicePath -match '^\s*"([^"]+)"') { $serviceExePath = $Matches[1] }
+elseif ($oldServicePath -match '^\s*([^\s]+\.exe)') { $serviceExePath = $Matches[1] }
+$runningExePath = ''
+if ($existingService -and $existingService.ProcessId) {
+    $serviceProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$($existingService.ProcessId)" -ErrorAction SilentlyContinue
+    if ($serviceProcess -and $serviceProcess.ExecutablePath) { $runningExePath = [string]$serviceProcess.ExecutablePath }
+}
+$activeExePath = if ($runningExePath) { $runningExePath } else { $serviceExePath }
+$actualVersion = Get-ExecutableVersion $activeExePath
+$remoteExe = @($manifest.files | Where-Object { $_.name -ieq 'Agent.exe' } | Select-Object -First 1)
+$remoteExeHash = if ($remoteExe -and $remoteExe[0].sha256) { ([string]$remoteExe[0].sha256).ToLower() } else { '' }
+$activeHash = if ($activeExePath -and (Test-Path -LiteralPath $activeExePath)) { Get-FileSha256 $activeExePath } else { '' }
+$activeIsCurrent = [bool](($remoteExeHash -and $activeHash -eq $remoteExeHash) -or
+    (-not $remoteExeHash -and $actualVersion -eq ([string]$manifest.version).TrimStart('v')))
+$needsHandover = (-not $isFirstInstall) -and (-not $activeIsCurrent)
+try {
+    if ($actualVersion -and ([version]$actualVersion -gt [version](([string]$manifest.version).TrimStart('v')))) {
+        Write-Log "Refusing stale manifest downgrade: active=$actualVersion manifest=$($manifest.version) source=$chosen" 'ERROR'
+        exit 8
+    }
+} catch [System.Management.Automation.PipelineStoppedException] { throw } catch {}
+Write-Log "Detected state: service=$($existingService.State) configured='$serviceExePath' running='$runningExePath' actual='$actualVersion' marker='$localVersion' current=$activeIsCurrent" 'WARN'
 
 # ---------- 下载 / 校验 ----------
 $changed = $false
@@ -369,13 +408,25 @@ if ($needsHandover) {
     Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
 
     Write-Log "启动候选进程并等待 Server 接管同一 InstanceId" 'WARN'
-    $candidate = Start-Process -FilePath $candidateExe `
-        -ArgumentList @('-handover-once','-handover-ready',$candidateReady,'-run') `
-        -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru
+    Write-Log "候选诊断日志: $candidateReady.log；等待认证最长 45 秒" 'WARN'
+    try {
+        $candidate = Start-Process -FilePath $candidateExe `
+            -ArgumentList @('-handover-once','-handover-ready',$candidateReady,'-run') `
+            -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru
+    } catch {
+        Write-Log "候选进程无法启动: $($_.Exception.Message)" 'ERROR'
+        exit 5
+    }
     if (-not (Wait-ReadyFile -Path $candidateReady)) {
+        $candidate.Refresh()
+        $candidateCode = if ($candidate.HasExited) { $candidate.ExitCode } else { 'running' }
+        Write-Log "Candidate diagnostics: PID=$($candidate.Id) Exited=$($candidate.HasExited) ExitCode=$candidateCode Log=$candidateReady.log" 'ERROR'
+        if (Test-Path -LiteralPath "$candidateReady.log") {
+            Get-Content -LiteralPath "$candidateReady.log" -Tail 40 | ForEach-Object { Write-Log "candidate> $_" 'ERROR' }
+        }
         Stop-Process -Id $candidate.Id -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
-        Write-Log "Candidate did not receive Server handover confirmation. Old service is still running. Check Server >= 1.12, endpoint/protocol/port/password, and TLS fingerprint in $iniPath" 'ERROR'
+        Write-Log "Candidate did not receive Server handover confirmation. Old service is still running. See $script:InstallLogPath and $candidateReady.log" 'ERROR'
         exit 5
     }
 

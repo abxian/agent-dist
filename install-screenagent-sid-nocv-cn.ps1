@@ -23,7 +23,8 @@ ScreenAgent 安装脚本 (国内源优先, 自动检测用户 + 管理员计划�
 param(
     [string]$InstallDir = $(if ($env:CAM_INSTALL_DIR) { $env:CAM_INSTALL_DIR } else { "$env:ProgramData\CamAgents\screen" }),
     [ValidateSet('auto','github','cn')]
-    [string]$Source = 'cn'
+    [string]$Source = 'cn',
+    [string]$CnBase = $(if ($env:CAM_DELIVERY_BASE) { $env:CAM_DELIVERY_BASE.TrimEnd('/') + '/downloads' } else { 'http://114.80.36.225:15667/6' })
 )
 $ScriptFlavor = 'screenagent-cn-task-20260601'
 
@@ -38,7 +39,6 @@ if ($ServerProtocol -notin @('tcp','tls') -or ($ServerProtocol -eq 'tls' -and $C
 $GithubUser       = 'abxian'
 $GithubRepo       = 'agent-dist'
 $GithubBranch     = 'main'
-$CnBase           = 'http://114.80.36.225:15667/6'
 $ShowInfoLogs     = $true
 
 $ErrorActionPreference = 'Stop'
@@ -51,14 +51,17 @@ $ManifestName = 'version-screen.json'
 $TaskName     = 'ScreenAgent'
 $ServiceName  = 'RemoteScreenAgent'
 $RunValueName = 'ScreenAgent'
+$script:InstallLogPath = $null
 
 # ── Logging ─────────────────────────────────────────────────────────────────
 function Write-Log {
     param([string]$Msg, [string]$Level = 'INFO')
-    if (-not $ShowInfoLogs -and $Level -eq 'INFO') { return }
     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $line = "[$ts][$Level] $Msg"
+    if ($script:InstallLogPath) { try { Add-Content -LiteralPath $script:InstallLogPath -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue } catch {} }
+    if (-not $ShowInfoLogs -and $Level -eq 'INFO') { return }
     $color = switch ($Level) { 'ERROR' { 'Red' } 'WARN' { 'Yellow' } default { 'Gray' } }
-    Write-Host "[$ts][$Level] $Msg" -ForegroundColor $color
+    Write-Host $line -ForegroundColor $color
 }
 function Fail { param([string]$Msg, [int]$Code = 1) Write-Log $Msg 'ERROR'; exit $Code }
 
@@ -225,11 +228,15 @@ $manifest.files = $manifestFiles
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
+$script:InstallLogPath = Join-Path $InstallDir 'install-screenagent.log'
+Write-Log "==== installer start: source=$chosen manifest=$manifestUrl ====" 'WARN'
 $versionFile  = Join-Path $InstallDir 'installed.version'
 $localVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { '' }
 $agentExe     = Join-Path $InstallDir 'ScreenAgent.exe'
 $oldTask      = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 $oldTaskXml   = if ($oldTask) { Export-ScheduledTask -TaskName $TaskName } else { $null }
+$oldTaskExecute = if ($oldTask) { [string](@($oldTask.Actions)[0].Execute) } else { '' }
+$oldTaskArguments = if ($oldTask) { [string](@($oldTask.Actions)[0].Arguments) } else { '' }
 $safeVersion  = ([string]$manifest.version -replace '[^0-9A-Za-z._-]', '_')
 $candidateExe = if ($oldTask) { Join-Path $InstallDir "ScreenAgent-$safeVersion.exe" } else { $agentExe }
 $candidateMsQuic = if ($oldTask) { Join-Path $InstallDir "msquic-$safeVersion.dll" } else { Join-Path $InstallDir 'msquic.dll' }
@@ -237,8 +244,20 @@ $runningLegacyImage = Get-CimInstance Win32_Process -Filter "Name like 'ScreenAg
     Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ne $candidateExe -and
                    (Split-Path $_.ExecutablePath -Parent) -eq $InstallDir } |
     Select-Object -First 1
+$taskExePath = if ($oldTask) { [string](@($oldTask.Actions)[0].Execute) } else { '' }
+$actualVersion = if ((Split-Path $taskExePath -Leaf) -match '-v?([0-9]+(?:\.[0-9]+){1,3})\.exe$') { $Matches[1] } elseif (Test-Path -LiteralPath $taskExePath) { (([Diagnostics.FileVersionInfo]::GetVersionInfo($taskExePath).ProductVersion -replace ',','.').TrimEnd('.0')) } else { '' }
+$remoteExe = @($manifest.files | Where-Object { $_.name -ieq 'ScreenAgent.exe' } | Select-Object -First 1)
+$remoteExeHash = if ($remoteExe -and $remoteExe[0].sha256) { ([string]$remoteExe[0].sha256).ToLower() } else { '' }
+$activeHash = if (Test-Path -LiteralPath $taskExePath) { Get-FileSha256 $taskExePath } else { '' }
+$activeIsCurrent = [bool](($remoteExeHash -and $activeHash -eq $remoteExeHash) -or (-not $remoteExeHash -and $actualVersion -eq ([string]$manifest.version).TrimStart('v')))
+try {
+    if ($actualVersion -and ([version]$actualVersion -gt [version](([string]$manifest.version).TrimStart('v')))) {
+        Fail "Refusing stale manifest downgrade: active=$actualVersion manifest=$($manifest.version) source=$chosen" 8
+    }
+} catch [System.Management.Automation.PipelineStoppedException] { throw } catch {}
 $needsHandover = [bool]($user -and $oldTask -and
-    ($localVersion -ne [string]$manifest.version -or $oldTask.Actions.Execute -ne $candidateExe -or $runningLegacyImage))
+    (-not $activeIsCurrent -or $runningLegacyImage))
+Write-Log "Detected state: task=$($oldTask.State) path='$taskExePath' actual='$actualVersion' marker='$localVersion' current=$activeIsCurrent runningLegacy=$([bool]$runningLegacyImage)" 'WARN'
 
 Write-Log "安装目录:  $InstallDir" 'WARN'
 Write-Log "Task 名:   $TaskName" 'WARN'
@@ -441,6 +460,7 @@ function Wait-ReadyFile {
 }
 
 $handoverTask = $null
+$candidateProcess = $null
 $serviceReady = $null
 if ($needsHandover) {
     $token = [Guid]::NewGuid().ToString('N')
@@ -448,16 +468,39 @@ if ($needsHandover) {
     $candidateReady = Join-Path $InstallDir ".handover-screen-candidate-$token.ready"
     $serviceReady = Join-Path $InstallDir ".handover-screen-task-$token.ready"
     Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
-    $candidateAction = New-ScheduledTaskAction -Execute $candidateExe `
-        -Argument ('-handover-once -handover-ready "{0}" -run' -f $candidateReady) `
-        -WorkingDirectory $InstallDir
-    Register-ScheduledTask -TaskName $handoverTask -Action $candidateAction `
-        -Principal $principal -Settings $settings -Force | Out-Null
-    Start-ScheduledTask -TaskName $handoverTask
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $runCandidateDirect = ($currentSid -eq $user.Sid)
+    if ($runCandidateDirect) {
+        Write-Log '当前管理员会话就是目标桌面用户，直接启动候选（绕过可能拒绝按需启动的 Task Scheduler）' 'WARN'
+        $candidateProcess = Start-Process -FilePath $candidateExe `
+            -ArgumentList @('-handover-once','-handover-ready',$candidateReady,'-run') `
+            -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru
+    } else {
+        $candidateAction = New-ScheduledTaskAction -Execute $candidateExe `
+            -Argument ('-handover-once -handover-ready "{0}" -run' -f $candidateReady) `
+            -WorkingDirectory $InstallDir
+        Register-ScheduledTask -TaskName $handoverTask -Action $candidateAction `
+            -Principal $principal -Settings $settings -Force | Out-Null
+        Start-ScheduledTask -TaskName $handoverTask
+    }
+    Write-Log "候选诊断日志: $candidateReady.log；等待认证最长 45 秒" 'WARN'
     if (-not (Wait-ReadyFile -Path $candidateReady)) {
-        Unregister-ScheduledTask -TaskName $handoverTask -Confirm:$false -ErrorAction SilentlyContinue
+        if ($runCandidateDirect) {
+            $candidateProcess.Refresh()
+            $candidateCode = if ($candidateProcess.HasExited) { $candidateProcess.ExitCode } else { 'running' }
+            Write-Log "Candidate diagnostics: PID=$($candidateProcess.Id) Exited=$($candidateProcess.HasExited) ExitCode=$candidateCode Log=$candidateReady.log" 'ERROR'
+        } else {
+            $candidateInfo = Get-ScheduledTaskInfo -TaskName $handoverTask -ErrorAction SilentlyContinue
+            $candidateState = (Get-ScheduledTask -TaskName $handoverTask -ErrorAction SilentlyContinue).State
+            Write-Log "Candidate task diagnostics: State=$candidateState LastTaskResult=$($candidateInfo.LastTaskResult) Log=$candidateReady.log" 'ERROR'
+        }
+        if (Test-Path -LiteralPath "$candidateReady.log") {
+            Get-Content -LiteralPath "$candidateReady.log" -Tail 40 | ForEach-Object { Write-Log "candidate> $_" 'ERROR' }
+        }
+        if (-not $runCandidateDirect) { Unregister-ScheduledTask -TaskName $handoverTask -Confirm:$false -ErrorAction SilentlyContinue }
+        if ($candidateProcess) { Stop-Process -Id $candidateProcess.Id -Force -ErrorAction SilentlyContinue }
         Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
-        Fail "Screen candidate did not receive Server handover confirmation. Old task remains. Check Server >= 1.12 and endpoint settings in $iniPath" 40
+        Fail "Screen candidate did not receive Server handover confirmation. Old task remains. See $script:InstallLogPath and $candidateReady.log" 40
     }
     $action = New-ScheduledTaskAction -Execute $candidateExe `
         -Argument ('-handover-ready "{0}" -run' -f $serviceReady) `
@@ -483,7 +526,7 @@ if ($needsHandover) {
         Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ne $candidateExe -and
                        (Split-Path $_.ExecutablePath -Parent) -eq $InstallDir } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    Stop-ScheduledTask -TaskName $handoverTask -ErrorAction SilentlyContinue
+    if (-not $runCandidateDirect) { Stop-ScheduledTask -TaskName $handoverTask -ErrorAction SilentlyContinue }
     for ($i = 0; $i -lt 100; $i++) {
         $candidateRunning = Get-CimInstance Win32_Process -Filter "Name like 'ScreenAgent%.exe'" -ErrorAction SilentlyContinue |
             Where-Object { $_.ExecutablePath -eq $candidateExe }
@@ -493,7 +536,15 @@ if ($needsHandover) {
     Get-CimInstance Win32_Process -Filter "Name like 'ScreenAgent%.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.ExecutablePath -eq $candidateExe } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    Start-ScheduledTask -TaskName $TaskName
+    $finalProcess = $null
+    if ($runCandidateDirect) {
+        Write-Log '直接启动正式新进程；计划任务保留用于后续登录自启' 'WARN'
+        $finalProcess = Start-Process -FilePath $candidateExe `
+            -ArgumentList @('-handover-ready',$serviceReady,'-run') `
+            -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru
+    } else {
+        Start-ScheduledTask -TaskName $TaskName
+    }
     if (-not (Wait-ReadyFile -Path $serviceReady)) {
         $failedTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
         $failedInfo = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -507,11 +558,16 @@ if ($needsHandover) {
             ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
         Register-ScheduledTask -TaskName $TaskName -Xml $oldTaskXml -Force | Out-Null
-        Start-ScheduledTask -TaskName $TaskName
-        Unregister-ScheduledTask -TaskName $handoverTask -Confirm:$false -ErrorAction SilentlyContinue
+        if ($runCandidateDirect -and $oldTaskExecute) {
+            Start-Process -FilePath $oldTaskExecute -ArgumentList $oldTaskArguments `
+                -WorkingDirectory (Split-Path $oldTaskExecute -Parent) -WindowStyle Hidden | Out-Null
+        } else {
+            Start-ScheduledTask -TaskName $TaskName
+        }
+        if (-not $runCandidateDirect) { Unregister-ScheduledTask -TaskName $handoverTask -Confirm:$false -ErrorAction SilentlyContinue }
         Fail "New ScreenAgent task did not authenticate; restored old task. Check $iniPath" 41
     }
-    Unregister-ScheduledTask -TaskName $handoverTask -Confirm:$false -ErrorAction SilentlyContinue
+    if (-not $runCandidateDirect) { Unregister-ScheduledTask -TaskName $handoverTask -Confirm:$false -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
     Write-Log 'ScreenAgent 新旧进程无感交接完成' 'WARN'
 }
