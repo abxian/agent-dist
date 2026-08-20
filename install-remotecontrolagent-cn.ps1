@@ -101,7 +101,11 @@ function Get-RemoteFile {
 }
 function Get-RemoteString {
     param([string]$Url, [int]$TimeoutSec = 15)
-    try { return (Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec $TimeoutSec).Content }
+    try {
+        $content = (Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec $TimeoutSec).Content
+        if ($content -is [byte[]]) { return [Text.Encoding]::UTF8.GetString($content) }
+        return [string]$content
+    }
     catch { return $null }
 }
 function Get-FileSha256 {
