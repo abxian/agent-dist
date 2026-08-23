@@ -215,6 +215,14 @@ if ($existingService -and $existingService.ProcessId) {
     if ($serviceProcess -and $serviceProcess.ExecutablePath) { $runningExePath = [string]$serviceProcess.ExecutablePath }
 }
 $activeExePath = if ($runningExePath) { $runningExePath } else { $serviceExePath }
+$iniPath = Join-Path $InstallDir 'agent.ini'
+if (-not (Test-Path -LiteralPath $iniPath) -and $activeExePath) {
+    $legacyIni = Join-Path (Split-Path $activeExePath -Parent) 'agent.ini'
+    if ($legacyIni -ne $iniPath -and (Test-Path -LiteralPath $legacyIni)) {
+        Copy-Item -LiteralPath $legacyIni -Destination $iniPath -Force
+        Write-Log "已迁移旧 agent.ini: $legacyIni -> $iniPath（保留 InstanceId）" 'WARN'
+    }
+}
 $actualVersion = Get-ExecutableVersion $activeExePath
 $remoteExe = @($manifest.files | Where-Object { $_.name -ieq 'Agent.exe' } | Select-Object -First 1)
 $remoteExeHash = if ($remoteExe -and $remoteExe[0].sha256) { ([string]$remoteExe[0].sha256).ToLower() } else { '' }

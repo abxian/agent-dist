@@ -362,16 +362,26 @@ $oldTaskExecute = if ($oldTask) { [string](@($oldTask.Actions)[0].Execute) } els
 $oldTaskArguments = if ($oldTask) { [string](@($oldTask.Actions)[0].Arguments) } else { '' }
 $safeVersion  = ([string]$manifest.version -replace '[^0-9A-Za-z._-]', '_')
 $legacyInstallDir = Join-Path $env:ProgramData 'RemoteControlAgent'
+$legacyService = Get-CimInstance Win32_Service -Filter "Name='RemoteControlAgent'" -ErrorAction SilentlyContinue
+$legacyServiceExe = ''
+if ($legacyService -and $legacyService.PathName) {
+    if ([string]$legacyService.PathName -match '^\s*"([^"]+)"') { $legacyServiceExe = $Matches[1] }
+    elseif ([string]$legacyService.PathName -match '^\s*([^\s]+\.exe)') { $legacyServiceExe = $Matches[1] }
+}
+$runtimeDirs = @($InstallDir,$legacyInstallDir)
+if ($legacyServiceExe) { $runtimeDirs += (Split-Path $legacyServiceExe -Parent) }
+$runtimeDirs = @($runtimeDirs | Where-Object { $_ } | Select-Object -Unique)
 $allRunningImages = @(Get-CimInstance Win32_Process -Filter "Name like 'RemoteControlAgent%.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.ExecutablePath -and (Split-Path $_.ExecutablePath -Parent) -in @($InstallDir,$legacyInstallDir) })
+    Where-Object { $_.ExecutablePath -and (Split-Path $_.ExecutablePath -Parent) -in $runtimeDirs })
 $existingRuntime = $allRunningImages | Select-Object -First 1
-$hasExistingRuntime = [bool]($oldTask -or $existingRuntime)
+$hasExistingRuntime = [bool]($oldTask -or $existingRuntime -or $legacyService)
+$isFirstInstall = -not $hasExistingRuntime
 $candidateExe = if ($hasExistingRuntime) { Join-Path $InstallDir "RemoteControlAgent-$safeVersion.exe" } else { $agentExe }
 $candidateMsQuic = if ($hasExistingRuntime) { Join-Path $InstallDir "msquic-$safeVersion.dll" } else { Join-Path $InstallDir 'msquic.dll' }
 $runningLegacyImage = $allRunningImages | Where-Object { $_.ExecutablePath -ne $candidateExe } | Select-Object -First 1
-$oldRuntimeExecute = if ($existingRuntime) { [string]$existingRuntime.ExecutablePath } else { $oldTaskExecute }
+$oldRuntimeExecute = if ($existingRuntime) { [string]$existingRuntime.ExecutablePath } elseif ($legacyServiceExe) { $legacyServiceExe } else { $oldTaskExecute }
 $taskExePath = if ($oldTask) { [string](@($oldTask.Actions)[0].Execute) } else { '' }
-$activeExePath = if ($existingRuntime) { [string]$existingRuntime.ExecutablePath } else { $taskExePath }
+$activeExePath = if ($existingRuntime) { [string]$existingRuntime.ExecutablePath } elseif ($legacyServiceExe) { $legacyServiceExe } else { $taskExePath }
 $actualVersion = if ($activeExePath -and (Split-Path $activeExePath -Leaf) -match '-v?([0-9]+(?:\.[0-9]+){1,3})\.exe$') { $Matches[1] } elseif ($activeExePath -and (Test-Path -LiteralPath $activeExePath)) { (([Diagnostics.FileVersionInfo]::GetVersionInfo($activeExePath).ProductVersion -replace ',','.').TrimEnd('.0')) } else { '' }
 $remoteExe = @($manifest.files | Where-Object { $_.name -ieq 'RemoteControlAgent.exe' } | Select-Object -First 1)
 $remoteExeHash = if ($remoteExe -and $remoteExe[0].sha256) { ([string]$remoteExe[0].sha256).ToLower() } else { '' }
@@ -383,7 +393,7 @@ try {
     }
 } catch [System.Management.Automation.PipelineStoppedException] { throw } catch {}
 $needsHandover = [bool]($user -and $hasExistingRuntime -and
-    (-not $activeIsCurrent -or $runningLegacyImage))
+    (-not $activeIsCurrent -or $runningLegacyImage -or $legacyService))
 $installState = if (-not $hasExistingRuntime) { 'first-install' } elseif ($activeIsCurrent -and $existingRuntime) { 'current' } elseif ($activeIsCurrent) { 'repair-start' } else { 'upgrade' }
 Write-Log "Detected state: mode=$installState task=$($oldTask.State) configured='$taskExePath' running='$($existingRuntime.ExecutablePath)' actual='$actualVersion' marker='$localVersion' current=$activeIsCurrent" 'WARN'
 
@@ -396,12 +406,12 @@ Write-Log "Task 名:   $TaskName" 'WARN'
 Write-Log "本地版本:  '$localVersion'  远端版本: '$($manifest.version)'" 'WARN'
 
 # ── Clean up legacy footprints — service / Run keys / old tasks ─────────────
-$svc = Get-Service -Name 'RemoteControlAgent' -ErrorAction SilentlyContinue
-if ($svc) {
-    Write-Log "清理旧 Windows 服务 RemoteControlAgent (避免 session 0 黑屏)" 'WARN'
-    try { & sc.exe stop   RemoteControlAgent | Out-Null } catch {}
-    Start-Sleep -Seconds 1
-    try { & sc.exe delete RemoteControlAgent | Out-Null } catch {}
+$legacyServiceWasRunning = [bool]($legacyService -and $legacyService.State -eq 'Running')
+if ($legacyService) {
+    Write-Log '检测到旧 Windows 服务 RemoteControlAgent；候选认证成功前保持运行' 'WARN'
+    if (-not $user) {
+        Fail '没有交互用户，不能把旧 RemoteControl 服务安全迁移到桌面任务；旧服务保持不变，请在用户登录后重试' 42
+    }
 }
 
 # Old HKLM Run entry that earlier versions of this installer may have left
@@ -453,6 +463,22 @@ foreach ($t in (Get-ScheduledTask -ErrorAction SilentlyContinue)) {
 }
 
 # Keep the current task/process alive until a candidate has authenticated.
+
+$iniPath = Join-Path $InstallDir 'remotecontrolagent.ini'
+if (-not (Test-Path -LiteralPath $iniPath)) {
+    $legacyIniCandidates = @()
+    foreach ($exe in @($activeExePath, $oldTaskExecute, $legacyServiceExe)) {
+        if ($exe) { $legacyIniCandidates += (Join-Path (Split-Path $exe -Parent) 'remotecontrolagent.ini') }
+    }
+    $legacyIniCandidates += (Join-Path $legacyInstallDir 'remotecontrolagent.ini')
+    $legacyIni = $legacyIniCandidates | Where-Object {
+        $_ -and $_ -ne $iniPath -and (Test-Path -LiteralPath $_)
+    } | Select-Object -First 1
+    if ($legacyIni) {
+        Copy-Item -LiteralPath $legacyIni -Destination $iniPath -Force
+        Write-Log "已迁移旧 remotecontrolagent.ini: $legacyIni -> $iniPath（保留 InstanceId）" 'WARN'
+    }
+}
 
 # ── Download / verify files (skip ini + opencv on hash-drift) ───────────────
 $hasLocalIni = Test-Path (Join-Path $InstallDir 'remotecontrolagent.ini')
@@ -574,6 +600,10 @@ if ($user) {
                     -RunLevel Highest
     $modeDesc  = "atLogon[ANY USER], BUILTIN\Users, RunLevel=Highest"
 }
+$watchdogTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+    -RepetitionInterval (New-TimeSpan -Minutes 1) `
+    -RepetitionDuration (New-TimeSpan -Days 3650)
+$taskTriggers = @($trigger, $watchdogTrigger)
 
 function Wait-ReadyFile {
     param([string]$Path,[int]$TimeoutSeconds = 45)
@@ -631,6 +661,15 @@ if ($needsHandover) {
         Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
         Fail "Remote candidate did not receive Server handover confirmation. Old task remains. See $script:InstallLogPath and $candidateReady.log" 40
     }
+    if ($legacyService) {
+        Write-Log '候选已认证，停止旧 Windows 服务 RemoteControlAgent' 'WARN'
+        try { & sc.exe stop RemoteControlAgent | Out-Null } catch {}
+        for ($i = 0; $i -lt 30; $i++) {
+            $legacyState = (Get-CimInstance Win32_Service -Filter "Name='RemoteControlAgent'" -ErrorAction SilentlyContinue).State
+            if (-not $legacyState -or $legacyState -eq 'Stopped') { break }
+            Start-Sleep -Milliseconds 500
+        }
+    }
     $action = New-ScheduledTaskAction -Execute $candidateExe `
         -Argument ('-handover-ready "{0}" -run' -f $serviceReady) `
         -WorkingDirectory $InstallDir
@@ -639,7 +678,7 @@ if ($needsHandover) {
 Register-ScheduledTask `
     -TaskName $TaskName `
     -Action $action `
-    -Trigger $trigger `
+    -Trigger $taskTriggers `
     -Principal $principal `
     -Settings $settings `
     -Force | Out-Null
@@ -648,7 +687,7 @@ Write-Log "已注册 Scheduled Task: $TaskName ($modeDesc)" 'WARN'
 if ($needsHandover) {
     Get-CimInstance Win32_Process -Filter "Name like 'RemoteControlAgent%.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ne $candidateExe -and
-                       (Split-Path $_.ExecutablePath -Parent) -in @($InstallDir,$legacyInstallDir) } |
+                       (Split-Path $_.ExecutablePath -Parent) -in $runtimeDirs } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     # Avoid a candidate/permanent-process race for the same InstanceId on
     # slower relays. The candidate has already proved the new image and config;
@@ -688,13 +727,15 @@ if ($needsHandover) {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
         if ($oldTaskXml) {
             Register-ScheduledTask -TaskName $TaskName -Xml $oldTaskXml -Force | Out-Null
-        } elseif ($oldRuntimeExecute) {
+        } elseif ($oldRuntimeExecute -and -not $legacyService) {
             $rollbackAction = New-ScheduledTaskAction -Execute $oldRuntimeExecute -Argument '-run' `
                 -WorkingDirectory (Split-Path $oldRuntimeExecute -Parent)
-            Register-ScheduledTask -TaskName $TaskName -Action $rollbackAction -Trigger $trigger `
+            Register-ScheduledTask -TaskName $TaskName -Action $rollbackAction -Trigger $taskTriggers `
                 -Principal $principal -Settings $settings -Force | Out-Null
         }
-        if ($runCandidateDirect -and $oldRuntimeExecute) {
+        if ($legacyService) {
+            if ($legacyServiceWasRunning) { try { & sc.exe start RemoteControlAgent | Out-Null } catch {} }
+        } elseif ($runCandidateDirect -and $oldRuntimeExecute) {
             $rollbackArguments = if ($oldTaskArguments) { $oldTaskArguments } else { '-run' }
             Start-InteractiveAgentProcess -FilePath $oldRuntimeExecute -Arguments $rollbackArguments `
                 -WorkingDirectory (Split-Path $oldRuntimeExecute -Parent) -TargetUser $user | Out-Null
@@ -705,6 +746,10 @@ if ($needsHandover) {
         Fail "New RemoteControlAgent task did not authenticate; restored old task. Check $iniPath" 41
     }
     if (-not $runCandidateDirect) { Unregister-ScheduledTask -TaskName $handoverTask -Confirm:$false -ErrorAction SilentlyContinue }
+    if ($legacyService) {
+        try { & sc.exe delete RemoteControlAgent | Out-Null } catch {}
+        Write-Log '新进程认证完成，已删除旧 Windows 服务 RemoteControlAgent' 'WARN'
+    }
     Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
     Write-Log 'RemoteControlAgent 新旧进程无感交接完成' 'WARN'
 }

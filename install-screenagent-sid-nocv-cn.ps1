@@ -383,16 +383,30 @@ $oldTaskXml   = if ($oldTask) { Export-ScheduledTask -TaskName $TaskName } else 
 $oldTaskExecute = if ($oldTask) { [string](@($oldTask.Actions)[0].Execute) } else { '' }
 $oldTaskArguments = if ($oldTask) { [string](@($oldTask.Actions)[0].Arguments) } else { '' }
 $safeVersion  = ([string]$manifest.version -replace '[^0-9A-Za-z._-]', '_')
+$legacyInstallDirs = @(
+    (Join-Path $env:ProgramData 'ScreenAgent'),
+    (Join-Path $env:ProgramData 'RemoteScreenAgent')
+) | Select-Object -Unique
+$legacyService = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
+$legacyServiceExe = ''
+if ($legacyService -and $legacyService.PathName) {
+    if ([string]$legacyService.PathName -match '^\s*"([^"]+)"') { $legacyServiceExe = $Matches[1] }
+    elseif ([string]$legacyService.PathName -match '^\s*([^\s]+\.exe)') { $legacyServiceExe = $Matches[1] }
+}
+$runtimeDirs = @($InstallDir) + $legacyInstallDirs
+if ($legacyServiceExe) { $runtimeDirs += (Split-Path $legacyServiceExe -Parent) }
+$runtimeDirs = @($runtimeDirs | Where-Object { $_ } | Select-Object -Unique)
 $allRunningImages = @(Get-CimInstance Win32_Process -Filter "Name like 'ScreenAgent%.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.ExecutablePath -and (Split-Path $_.ExecutablePath -Parent) -eq $InstallDir })
+    Where-Object { $_.ExecutablePath -and (Split-Path $_.ExecutablePath -Parent) -in $runtimeDirs })
 $existingRuntime = $allRunningImages | Select-Object -First 1
-$hasExistingRuntime = [bool]($oldTask -or $existingRuntime)
+$hasExistingRuntime = [bool]($oldTask -or $existingRuntime -or $legacyService)
+$isFirstInstall = -not $hasExistingRuntime
 $candidateExe = if ($hasExistingRuntime) { Join-Path $InstallDir "ScreenAgent-$safeVersion.exe" } else { $agentExe }
 $candidateMsQuic = if ($hasExistingRuntime) { Join-Path $InstallDir "msquic-$safeVersion.dll" } else { Join-Path $InstallDir 'msquic.dll' }
 $runningLegacyImage = $allRunningImages | Where-Object { $_.ExecutablePath -ne $candidateExe } | Select-Object -First 1
-$oldRuntimeExecute = if ($existingRuntime) { [string]$existingRuntime.ExecutablePath } else { $oldTaskExecute }
+$oldRuntimeExecute = if ($existingRuntime) { [string]$existingRuntime.ExecutablePath } elseif ($legacyServiceExe) { $legacyServiceExe } else { $oldTaskExecute }
 $taskExePath = if ($oldTask) { [string](@($oldTask.Actions)[0].Execute) } else { '' }
-$activeExePath = if ($existingRuntime) { [string]$existingRuntime.ExecutablePath } else { $taskExePath }
+$activeExePath = if ($existingRuntime) { [string]$existingRuntime.ExecutablePath } elseif ($legacyServiceExe) { $legacyServiceExe } else { $taskExePath }
 $actualVersion = if ($activeExePath -and (Split-Path $activeExePath -Leaf) -match '-v?([0-9]+(?:\.[0-9]+){1,3})\.exe$') { $Matches[1] } elseif ($activeExePath -and (Test-Path -LiteralPath $activeExePath)) { (([Diagnostics.FileVersionInfo]::GetVersionInfo($activeExePath).ProductVersion -replace ',','.').TrimEnd('.0')) } else { '' }
 $remoteExe = @($manifest.files | Where-Object { $_.name -ieq 'ScreenAgent.exe' } | Select-Object -First 1)
 $remoteExeHash = if ($remoteExe -and $remoteExe[0].sha256) { ([string]$remoteExe[0].sha256).ToLower() } else { '' }
@@ -404,7 +418,7 @@ try {
     }
 } catch [System.Management.Automation.PipelineStoppedException] { throw } catch {}
 $needsHandover = [bool]($user -and $hasExistingRuntime -and
-    (-not $activeIsCurrent -or $runningLegacyImage))
+    (-not $activeIsCurrent -or $runningLegacyImage -or $legacyService))
 $installState = if (-not $hasExistingRuntime) { 'first-install' } elseif ($activeIsCurrent -and $existingRuntime) { 'current' } elseif ($activeIsCurrent) { 'repair-start' } else { 'upgrade' }
 Write-Log "Detected state: mode=$installState task=$($oldTask.State) configured='$taskExePath' running='$($existingRuntime.ExecutablePath)' actual='$actualVersion' marker='$localVersion' current=$activeIsCurrent" 'WARN'
 
@@ -413,12 +427,15 @@ Write-Log "Task 名:   $TaskName" 'WARN'
 Write-Log "本地版本:  '$localVersion'  远端版本: '$($manifest.version)'" 'WARN'
 
 # ── Clean up legacy footprints — service / Run keys / old tasks ─────────────
-$svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if ($svc) {
-    Write-Log "清理旧 Windows 服务 $ServiceName (避免 session 0 黑屏)" 'WARN'
-    try { & sc.exe stop   $ServiceName | Out-Null } catch {}
-    Start-Sleep -Seconds 1
-    try { & sc.exe delete $ServiceName | Out-Null } catch {}
+# A legacy service is intentionally kept alive until the replacement has
+# authenticated. Stopping it here created an avoidable outage and made a bad
+# config/download look like an upgrade that had simply hung.
+$legacyServiceWasRunning = [bool]($legacyService -and $legacyService.State -eq 'Running')
+if ($legacyService) {
+    Write-Log "检测到旧 Windows 服务 $ServiceName；候选认证成功前保持运行" 'WARN'
+    if (-not $user) {
+        Fail "没有交互用户，不能把旧 Screen 服务安全迁移到桌面任务；旧服务保持不变，请在用户登录后重试" 42
+    }
 }
 
 # Old HKLM Run entry from earlier installers
@@ -471,6 +488,25 @@ foreach ($t in (Get-ScheduledTask -ErrorAction SilentlyContinue)) {
 
 # Keep the current task/process alive while the candidate downloads and
 # authenticates. It is retired only after the blue/green readiness barrier.
+
+# Copy the old install's identity/config before downloading a default INI.
+# This covers service/Run-key generations that lived directly under
+# C:\ProgramData\ScreenAgent or C:\ProgramData\RemoteScreenAgent.
+$iniPath = Join-Path $InstallDir 'screenagent.ini'
+if (-not (Test-Path -LiteralPath $iniPath)) {
+    $legacyIniCandidates = @()
+    foreach ($exe in @($activeExePath, $oldTaskExecute, $legacyServiceExe)) {
+        if ($exe) { $legacyIniCandidates += (Join-Path (Split-Path $exe -Parent) 'screenagent.ini') }
+    }
+    foreach ($dir in $legacyInstallDirs) { $legacyIniCandidates += (Join-Path $dir 'screenagent.ini') }
+    $legacyIni = $legacyIniCandidates | Where-Object {
+        $_ -and $_ -ne $iniPath -and (Test-Path -LiteralPath $_)
+    } | Select-Object -First 1
+    if ($legacyIni) {
+        Copy-Item -LiteralPath $legacyIni -Destination $iniPath -Force
+        Write-Log "已迁移旧 screenagent.ini: $legacyIni -> $iniPath（保留 InstanceId）" 'WARN'
+    }
+}
 
 # ── Download / verify files (skip ini + opencv on hash-drift) ───────────────
 $hasLocalIni = Test-Path (Join-Path $InstallDir 'screenagent.ini')
@@ -598,6 +634,15 @@ if ($user) {
                     -RunLevel Highest
     $modeDesc  = "atLogon[ANY USER], BUILTIN\Users, RunLevel=Highest"
 }
+# A SYSTEM installer starts the final image with CreateProcessAsUser because
+# Task Scheduler can reject an immediate InteractiveToken demand start with
+# 0x800710E0. This periodic trigger adopts supervision within at most one
+# minute if that directly launched process later exits. The Agent's per-session
+# mutex makes the repair launch a harmless no-op while the process is healthy.
+$watchdogTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+    -RepetitionInterval (New-TimeSpan -Minutes 1) `
+    -RepetitionDuration (New-TimeSpan -Days 3650)
+$taskTriggers = @($trigger, $watchdogTrigger)
 
 function Wait-ReadyFile {
     param([string]$Path,[int]$TimeoutSeconds = 45)
@@ -655,6 +700,15 @@ if ($needsHandover) {
         Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
         Fail "Screen candidate did not receive Server handover confirmation. Old task remains. See $script:InstallLogPath and $candidateReady.log" 40
     }
+    if ($legacyService) {
+        Write-Log "候选已认证，停止旧 Windows 服务 $ServiceName" 'WARN'
+        try { & sc.exe stop $ServiceName | Out-Null } catch {}
+        for ($i = 0; $i -lt 30; $i++) {
+            $legacyState = (Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue).State
+            if (-not $legacyState -or $legacyState -eq 'Stopped') { break }
+            Start-Sleep -Milliseconds 500
+        }
+    }
     $action = New-ScheduledTaskAction -Execute $candidateExe `
         -Argument ('-handover-ready "{0}" -run' -f $serviceReady) `
         -WorkingDirectory $InstallDir
@@ -663,7 +717,7 @@ if ($needsHandover) {
 Register-ScheduledTask `
     -TaskName $TaskName `
     -Action $action `
-    -Trigger $trigger `
+    -Trigger $taskTriggers `
     -Principal $principal `
     -Settings $settings `
     -Force | Out-Null
@@ -677,7 +731,7 @@ if ($needsHandover) {
     # its handover confirmation.
     Get-CimInstance Win32_Process -Filter "Name like 'ScreenAgent%.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ne $candidateExe -and
-                       (Split-Path $_.ExecutablePath -Parent) -eq $InstallDir } |
+                       (Split-Path $_.ExecutablePath -Parent) -in $runtimeDirs } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     if (-not $runCandidateDirect) { Stop-ScheduledTask -TaskName $handoverTask -ErrorAction SilentlyContinue }
     for ($i = 0; $i -lt 100; $i++) {
@@ -714,13 +768,15 @@ if ($needsHandover) {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
         if ($oldTaskXml) {
             Register-ScheduledTask -TaskName $TaskName -Xml $oldTaskXml -Force | Out-Null
-        } elseif ($oldRuntimeExecute) {
+        } elseif ($oldRuntimeExecute -and -not $legacyService) {
             $rollbackAction = New-ScheduledTaskAction -Execute $oldRuntimeExecute -Argument '-run' `
                 -WorkingDirectory (Split-Path $oldRuntimeExecute -Parent)
-            Register-ScheduledTask -TaskName $TaskName -Action $rollbackAction -Trigger $trigger `
+            Register-ScheduledTask -TaskName $TaskName -Action $rollbackAction -Trigger $taskTriggers `
                 -Principal $principal -Settings $settings -Force | Out-Null
         }
-        if ($runCandidateDirect -and $oldRuntimeExecute) {
+        if ($legacyService) {
+            if ($legacyServiceWasRunning) { try { & sc.exe start $ServiceName | Out-Null } catch {} }
+        } elseif ($runCandidateDirect -and $oldRuntimeExecute) {
             $rollbackArguments = if ($oldTaskArguments) { $oldTaskArguments } else { '-run' }
             Start-InteractiveAgentProcess -FilePath $oldRuntimeExecute -Arguments $rollbackArguments `
                 -WorkingDirectory (Split-Path $oldRuntimeExecute -Parent) -TargetUser $user | Out-Null
@@ -731,6 +787,10 @@ if ($needsHandover) {
         Fail "New ScreenAgent task did not authenticate; restored old task. Check $iniPath" 41
     }
     if (-not $runCandidateDirect) { Unregister-ScheduledTask -TaskName $handoverTask -Confirm:$false -ErrorAction SilentlyContinue }
+    if ($legacyService) {
+        try { & sc.exe delete $ServiceName | Out-Null } catch {}
+        Write-Log "新进程认证完成，已删除旧 Windows 服务 $ServiceName" 'WARN'
+    }
     Remove-Item -LiteralPath $candidateReady,$serviceReady -Force -ErrorAction SilentlyContinue
     Write-Log 'ScreenAgent 新旧进程无感交接完成' 'WARN'
 }
