@@ -26,6 +26,13 @@ param(
     [string]$Source = 'cn',
     [string]$CnBase = $(if ($env:CAM_DELIVERY_BASE) { $env:CAM_DELIVERY_BASE.TrimEnd('/') + '/downloads' } else { 'http://114.80.36.225:15667/6' })
 )
+
+# Legacy AgentWebUpdate (<= 1.13.10) launches this script with
+# "-Source auto". Reject that signature before elevation or task changes.
+if ($Source -eq 'auto') {
+    throw 'Automatic ScreenAgent updates are disabled. Run this installer manually with -Source cn or -Source github.'
+}
+
 $ScriptFlavor = 'screenagent-cn-task-20260601'
 
 # ── 配置区 ───────────────────────────────────────────────────────────────────

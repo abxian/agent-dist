@@ -32,6 +32,13 @@ param(
     [string]$CnBase = 'http://114.80.36.225:15667/6'
 )
 
+# Legacy AgentWebUpdate (<= 1.13.10) launches this script with
+# "-Source auto". Reject that signature before touching services or files so
+# publishing a new manual package can never update an older Agent by itself.
+if ($Source -eq 'auto') {
+    throw 'Automatic Agent updates are disabled. Run this installer manually with -Source cn or -Source github.'
+}
+
 $ErrorActionPreference = 'Stop'
 $script:InstallLogPath = $null
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls
