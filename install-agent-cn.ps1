@@ -379,6 +379,9 @@ if ($explicitServer) {
 if ($env:CAM_DELIVERY_BASE) {
     Set-IniValuePreserve $iniPath 'Bootstrap' 'ConfigUrl' $env:CAM_DELIVERY_BASE.TrimEnd('/')
 }
+if ($env:CAM_DEVICE_TOKEN) {
+    Set-IniValuePreserve $iniPath 'Identity' 'DeviceToken' $env:CAM_DEVICE_TOKEN
+}
 Set-IniValuePreserve $iniPath 'QUIC' 'Enabled' '1'
 
 if ($isFirstInstall) {

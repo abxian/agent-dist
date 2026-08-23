@@ -1,17 +1,21 @@
-﻿{
-    "version":  "1.0.15",
-    "files":  [
-                  {
-                      "name":  "Agent.exe",
-                      "sha256":  "50ac891ed256d947dae797652fb57c9e6d5140b32eb7d64a9a8f0c87522518fb"
-                  },
-                  {
-                      "name":  "agent.ini",
-                      "sha256":  "2256940f2f60787b530e20e7f4fd8175211d40ead5af904a853c3c4aa58cd485"
-                  },
-                  {
-                      "name":  "opencv_world4100.dll",
-                      "sha256":  "e6e31e55b9b377b775782c4b27a80b2460dffe3dbee7898e034d25729dca0198"
-                  }
-              ]
+{
+  "version": "v1.13.10",
+  "files": [
+    {
+      "name": "Agent.exe",
+      "sha256": "5acf973ea20cd0a8c81e29617e970da2cd3998c41a1334247f3d0a50652039bf"
+    },
+    {
+      "name": "agent.ini",
+      "sha256": "0667b072143ef2e4f38dadedf6692199686f35df209bc3764d11ad3194c52a6c"
+    },
+    {
+      "name": "opencv_world4100.dll",
+      "sha256": "e6e31e55b9b377b775782c4b27a80b2460dffe3dbee7898e034d25729dca0198"
+    },
+    {
+      "name": "msquic.dll",
+      "sha256": "c17c65813fe007eb486a5270d244f3659261355795b27abb99bd19ff77539263"
+    }
+  ]
 }

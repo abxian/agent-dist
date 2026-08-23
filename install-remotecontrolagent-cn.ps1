@@ -558,6 +558,7 @@ if ($explicitServer) {
     Write-Log "Applied endpoint to existing remotecontrolagent.ini: $ServerProtocol $h`:$p (identity preserved)" 'WARN'
 }
 if ($env:CAM_DELIVERY_BASE) { Set-IniValuePreserve $iniPath 'Bootstrap' 'ConfigUrl' $env:CAM_DELIVERY_BASE.TrimEnd('/') }
+if ($env:CAM_DEVICE_TOKEN) { Set-IniValuePreserve $iniPath 'Identity' 'DeviceToken' $env:CAM_DEVICE_TOKEN }
 Set-IniValuePreserve $iniPath 'QUIC' 'Enabled' '1'
 
 # ── Create the scheduled task (logon + HIGHEST privilege) ───────────────────

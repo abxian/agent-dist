@@ -1,17 +1,21 @@
-﻿{
-    "version":  "1.0.15",
-    "files":  [
-                  {
-                      "name":  "ScreenAgent.exe",
-                      "sha256":  "21c4638b17e8abe89e3075db778884836f8b9b95700072a1f8974c6a5f10f9a3"
-                  },
-                  {
-                      "name":  "screenagent.ini",
-                      "sha256":  "aef7fb70a059407b2056d835347209e6000e1721f458af61a03851bbb06b8da3"
-                  },
-                  {
-                      "name":  "opencv_world4100.dll",
-                      "sha256":  "e6e31e55b9b377b775782c4b27a80b2460dffe3dbee7898e034d25729dca0198"
-                  }
-              ]
+{
+  "version": "v1.13.10",
+  "files": [
+    {
+      "name": "ScreenAgent.exe",
+      "sha256": "699e8a55c64fceb7d52a728eebe3ca89d2b62be1a71604e7d290d1dd11d5ad12"
+    },
+    {
+      "name": "screenagent.ini",
+      "sha256": "465c88aaff63677946429596baae8190964a0ffbbfa59eb1bd913983b936a654"
+    },
+    {
+      "name": "opencv_world4100.dll",
+      "sha256": "e6e31e55b9b377b775782c4b27a80b2460dffe3dbee7898e034d25729dca0198"
+    },
+    {
+      "name": "msquic.dll",
+      "sha256": "c17c65813fe007eb486a5270d244f3659261355795b27abb99bd19ff77539263"
+    }
+  ]
 }

@@ -1,17 +1,21 @@
-﻿{
-    "version":  "1.0.15",
-    "files":  [
-                  {
-                      "name":  "RemoteControlAgent.exe",
-                      "sha256":  "d9382f0f91081470f80c3d33d4b4945894d53cc533a12a0f30a9a4455e1c840d"
-                  },
-                  {
-                      "name":  "remotecontrolagent.ini",
-                      "sha256":  "aef7fb70a059407b2056d835347209e6000e1721f458af61a03851bbb06b8da3"
-                  },
-                  {
-                      "name":  "opencv_world4100.dll",
-                      "sha256":  "e6e31e55b9b377b775782c4b27a80b2460dffe3dbee7898e034d25729dca0198"
-                  }
-              ]
+{
+  "version": "v1.13.10",
+  "files": [
+    {
+      "name": "RemoteControlAgent.exe",
+      "sha256": "c6a16259b1d3e573a9b30bd1df7f03c7ef070080fb58abd73621fae1271c18d0"
+    },
+    {
+      "name": "remotecontrolagent.ini",
+      "sha256": "465c88aaff63677946429596baae8190964a0ffbbfa59eb1bd913983b936a654"
+    },
+    {
+      "name": "opencv_world4100.dll",
+      "sha256": "e6e31e55b9b377b775782c4b27a80b2460dffe3dbee7898e034d25729dca0198"
+    },
+    {
+      "name": "msquic.dll",
+      "sha256": "c17c65813fe007eb486a5270d244f3659261355795b27abb99bd19ff77539263"
+    }
+  ]
 }
