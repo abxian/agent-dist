@@ -1,4 +1,4 @@
-# agent-dist — Agent / ScreenAgent 安装与自动更新分发仓库
+# agent-dist — Agent / ScreenAgent 安装与手动升级分发仓库
 
 两套独立的客户端 + 一键安装脚本,**双源**(GitHub + 国内 dufs)互备、互为回退。
 
@@ -161,12 +161,12 @@ ScreenAgent.exe -start   # 或 sc start RemoteScreenAgent
 
 ---
 
-## 🔄 网站拉取更新与无感交接
+## 🔄 仅手动升级与无感交接
 
-Agent 从本地 INI 的 `[Update]` 区读取三端各自的版本清单、安装脚本
-URL 与 SHA-256。只接受 HTTPS（本机回环 HTTP 例外），发现更高版本且
-脚本校验通过后自行执行安装器。Server 不再负责加载升级包、推送升级
-或自动推送；迁移 Server 地址的功能继续保留。
+Agent 不再轮询版本清单，也不会自行下载或安装新版本。管理员需要明确
+重新执行对应安装命令；安装器读取版本清单、校验文件并判断当前机器的
+旧版/新版安装布局。升级时会移除旧 INI 中已废弃的 `[Update]` 区。
+Server 不提供加载升级包、推送升级或自动推送；迁移 Server 地址继续保留。
 
 安装器采用新旧进程蓝绿交接：候选进程先以相同 `InstanceId` 登录，
 等待 Server 完成画面、麦克风、录制与编码参数迁移并返回 ready，再切换
@@ -411,12 +411,6 @@ Remote Screen / Remote Control Agent:
 
 ```powershell
 iex (irm http://114.80.36.225:15667/6/install-remotecontrolagent-cn.ps1)
-```
-
-Screen Agent updater for machines that are already installed:
-
-```powershell
-iex (irm http://114.80.36.225:15667/6/update-screenagent-cn.ps1)
 ```
 
 Health check:

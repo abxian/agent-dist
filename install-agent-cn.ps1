@@ -1,11 +1,11 @@
 #Requires -Version 5.1
 <#
-Agent 安装 / 自动更新脚本 (国内源版本, 默认 -Source cn)
+Agent 安装 / 手动升级脚本 (国内源版本, 默认 -Source cn)
 用法:
     powershell -ExecutionPolicy Bypass -File .\install-agent-cn.ps1
     powershell -ExecutionPolicy Bypass -File .\install-agent-cn.ps1 -InstallDir "C:\Agent"
     iex (irm http://114.80.36.225:15667/6/install-agent-cn.ps1)
-全程无交互: 自动检测更新 -> 下载 -> 安装/替换。
+管理员显式执行后: 检测版本 -> 下载 -> 安装/替换。
 默认从国内 dufs 下载, 失败时自动回退 GitHub。
 #>
 
@@ -44,7 +44,7 @@ function Write-Log {
     if ($script:InstallLogPath) {
         try { Add-Content -LiteralPath $script:InstallLogPath -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue } catch {}
     }
-    # 静默模式: 仍显示 WARN / ERROR，自动更新失败时必须有下文。
+    # 静默模式: 仍显示 WARN / ERROR，手动升级失败时必须有下文。
     if ($VerbosePreference -eq 'SilentlyContinue' -and $Level -eq 'INFO') { return }
     $color = switch ($Level) { 'ERROR' { 'Red' } 'WARN' { 'Yellow' } default { 'Gray' } }
     Write-Host $line -ForegroundColor $color
@@ -124,6 +124,22 @@ function Set-IniValuePreserve {
         else { $lines.Insert($sectionEnd, "$Key=$Value") }
     }
     Set-Content -LiteralPath $Path -Value $lines -Encoding ASCII
+}
+
+# Versions before 1.13.11 could contain an [Update] section used by the
+# retired background updater. Manual installs/upgrades remove it while keeping
+# identity, migration rollback and media sections untouched.
+function Remove-IniSection {
+    param([string]$Path,[string]$Section)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $lines = @(Get-Content -LiteralPath $Path)
+    $result = [System.Collections.Generic.List[string]]::new()
+    $skip = $false
+    foreach ($line in $lines) {
+        if ([string]$line -match '^\s*\[([^]]+)\]\s*$') { $skip = $Matches[1] -ieq $Section }
+        if (-not $skip) { [void]$result.Add([string]$line) }
+    }
+    Set-Content -LiteralPath $Path -Value $result -Encoding ASCII
 }
 
 function Test-SourceReachable {
@@ -383,6 +399,7 @@ if ($env:CAM_DEVICE_TOKEN) {
     Set-IniValuePreserve $iniPath 'Identity' 'DeviceToken' $env:CAM_DEVICE_TOKEN
 }
 Set-IniValuePreserve $iniPath 'QUIC' 'Enabled' '1'
+Remove-IniSection $iniPath 'Update'
 
 if ($isFirstInstall) {
     Write-Log "首次安装, 执行 Agent.exe -install"

@@ -1,12 +1,12 @@
 #Requires -Version 5.1
 <#
-Agent 安装 / 自动更新脚本
+Agent 安装 / 手动升级脚本
 用法:
     powershell -ExecutionPolicy Bypass -File .\install-agent.ps1
     powershell -ExecutionPolicy Bypass -File .\install-agent.ps1 -Source github
     powershell -ExecutionPolicy Bypass -File .\install-agent.ps1 -Source cn
     powershell -ExecutionPolicy Bypass -File .\install-agent.ps1 -InstallDir "C:\Agent"
-全程无交互: 自动检测更新 -> 下载 -> 安装/替换。
+管理员显式执行后: 检测版本 -> 下载 -> 安装/替换。
 #>
 
 [CmdletBinding()]

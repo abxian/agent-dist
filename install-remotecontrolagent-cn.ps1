@@ -139,6 +139,18 @@ function Set-IniValuePreserve {
     }
     Set-Content -LiteralPath $Path -Value $lines -Encoding ASCII
 }
+function Remove-IniSection {
+    param([string]$Path,[string]$Section)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $lines = @(Get-Content -LiteralPath $Path)
+    $result = [System.Collections.Generic.List[string]]::new()
+    $skip = $false
+    foreach ($line in $lines) {
+        if ([string]$line -match '^\s*\[([^]]+)\]\s*$') { $skip = $Matches[1] -ieq $Section }
+        if (-not $skip) { [void]$result.Add([string]$line) }
+    }
+    Set-Content -LiteralPath $Path -Value $result -Encoding ASCII
+}
 function Test-SourceReachable {
     param([string]$Url)
     try { $req = [Net.HttpWebRequest]::Create($Url); $req.Method = 'HEAD'; $req.Timeout = 4000; $req.GetResponse().Close(); return $true }
@@ -560,6 +572,7 @@ if ($explicitServer) {
 if ($env:CAM_DELIVERY_BASE) { Set-IniValuePreserve $iniPath 'Bootstrap' 'ConfigUrl' $env:CAM_DELIVERY_BASE.TrimEnd('/') }
 if ($env:CAM_DEVICE_TOKEN) { Set-IniValuePreserve $iniPath 'Identity' 'DeviceToken' $env:CAM_DEVICE_TOKEN }
 Set-IniValuePreserve $iniPath 'QUIC' 'Enabled' '1'
+Remove-IniSection $iniPath 'Update'
 
 # ── Create the scheduled task (logon + HIGHEST privilege) ───────────────────
 #  Two modes:

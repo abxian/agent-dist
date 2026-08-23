@@ -1,13 +1,13 @@
 #Requires -Version 5.1
 <#
-ScreenAgent 安装 / 自动更新脚本
+ScreenAgent 安装 / 手动升级脚本
 用法:
     powershell -ExecutionPolicy Bypass -File .\install-screenagent.ps1
     powershell -ExecutionPolicy Bypass -File .\install-screenagent.ps1 -Source github
     powershell -ExecutionPolicy Bypass -File .\install-screenagent.ps1 -Source cn
     powershell -ExecutionPolicy Bypass -File .\install-screenagent.ps1 -InstallDir "C:\ScreenAgent"
     powershell -ExecutionPolicy Bypass -File .\install-screenagent.ps1 -ServerIp sx1.jc116.com -ServerPort 9999
-全程无交互: 自动检测更新 -> 下载 -> 安装/替换。
+管理员显式执行后: 检测版本 -> 下载 -> 安装/替换。
 与 install-agent.ps1 独立,装在单独的目录、单独的服务,与混合版 Agent 互不干扰。
 #>
 
