@@ -628,10 +628,11 @@ Remove-IniSection $iniPath 'Update'
 #  两种模式都用 RunLevel Highest 拿管理员权限，避免 session 0 黑屏 + UAC
 #  看不见 / SendInput 不到提升进程的问题.
 $actionArgs = '-run'
-$action  = New-ScheduledTaskAction `
+$permanentAction = New-ScheduledTaskAction `
             -Execute $candidateExe `
             -Argument $actionArgs `
             -WorkingDirectory $InstallDir
+$action = $permanentAction
 $settings = New-ScheduledTaskSettingsSet `
             -AllowStartIfOnBatteries `
             -DontStopIfGoingOnBatteries `
@@ -643,11 +644,14 @@ $settings = New-ScheduledTaskSettingsSet `
 
 if ($user) {
     $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $user.Account
+    # Some Windows installations refuse every on-demand task whose principal
+    # is a specific InteractiveToken user (0x800710E0), even while that user is
+    # logged on. A BUILTIN\Users group principal still runs in the triggering
+    # desktop session and preserves RunLevel Highest.
     $principal = New-ScheduledTaskPrincipal `
-                    -UserId $user.Sid `
-                    -LogonType Interactive `
+                    -GroupId 'S-1-5-32-545' `
                     -RunLevel Highest
-    $modeDesc  = "atLogon[$($user.Account)], RunLevel=Highest"
+    $modeDesc  = "atLogon[$($user.Account)], BUILTIN\Users, RunLevel=Highest"
 } else {
     $trigger   = New-ScheduledTaskTrigger -AtLogOn
     $principal = New-ScheduledTaskPrincipal `
@@ -730,9 +734,14 @@ if ($needsHandover) {
             Start-Sleep -Milliseconds 500
         }
     }
-    $action = New-ScheduledTaskAction -Execute $candidateExe `
-        -Argument ('-handover-ready "{0}" -run' -f $serviceReady) `
-        -WorkingDirectory $InstallDir
+    # When we can launch directly into the target session, keep the permanent
+    # task clean (`-run`) and use only the direct verification process for the
+    # ready marker. The task must never retain a temporary handover path.
+    if (-not $runCandidateDirect) {
+        $action = New-ScheduledTaskAction -Execute $candidateExe `
+            -Argument ('-handover-ready "{0}" -run' -f $serviceReady) `
+            -WorkingDirectory $InstallDir
+    }
 }
 
 Register-ScheduledTask `
@@ -806,6 +815,13 @@ if ($needsHandover) {
         }
         if (-not $runCandidateDirect) { Unregister-ScheduledTask -TaskName $handoverTask -Confirm:$false -ErrorAction SilentlyContinue }
         Fail "New ScreenAgent task did not authenticate; restored old task. Check $iniPath" 41
+    }
+    if (-not $runCandidateDirect) {
+        # The verification instance can continue serving this session, but all
+        # future logon/watchdog launches must use the stable permanent command.
+        Register-ScheduledTask -TaskName $TaskName -Action $permanentAction `
+            -Trigger $taskTriggers -Principal $principal -Settings $settings `
+            -Force | Out-Null
     }
     if (-not $runCandidateDirect) { Unregister-ScheduledTask -TaskName $handoverTask -Confirm:$false -ErrorAction SilentlyContinue }
     if ($legacyService) {

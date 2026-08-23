@@ -592,10 +592,11 @@ Remove-IniSection $iniPath 'Update'
 #  Both modes use RunLevel Highest so the agent has admin privileges in the
 #  user's session — sees UAC, can SendInput to elevated windows, captures
 #  the actual desktop instead of session 0's black screen.
-$action  = New-ScheduledTaskAction `
+$permanentAction = New-ScheduledTaskAction `
             -Execute $candidateExe `
             -Argument '-run' `
             -WorkingDirectory $InstallDir
+$action = $permanentAction
 $settings = New-ScheduledTaskSettingsSet `
             -AllowStartIfOnBatteries `
             -DontStopIfGoingOnBatteries `
@@ -607,11 +608,14 @@ $settings = New-ScheduledTaskSettingsSet `
 
 if ($user) {
     $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $user.Account
+    # Some Windows installations refuse every on-demand task whose principal
+    # is a specific InteractiveToken user (0x800710E0), even while that user is
+    # logged on. A BUILTIN\Users group principal still runs in the triggering
+    # desktop session and preserves RunLevel Highest.
     $principal = New-ScheduledTaskPrincipal `
-                    -UserId $user.Sid `
-                    -LogonType Interactive `
+                    -GroupId 'S-1-5-32-545' `
                     -RunLevel Highest
-    $modeDesc  = "atLogon[$($user.Account)], RunLevel=Highest"
+    $modeDesc  = "atLogon[$($user.Account)], BUILTIN\Users, RunLevel=Highest"
 } else {
     # AtLogOn without -User fires for any user; BUILTIN\Users SID as
     # principal means the task runs as whoever logged in.
@@ -691,9 +695,14 @@ if ($needsHandover) {
             Start-Sleep -Milliseconds 500
         }
     }
-    $action = New-ScheduledTaskAction -Execute $candidateExe `
-        -Argument ('-handover-ready "{0}" -run' -f $serviceReady) `
-        -WorkingDirectory $InstallDir
+    # When we can launch directly into the target session, keep the permanent
+    # task clean (`-run`) and use only the direct verification process for the
+    # ready marker. The task must never retain a temporary handover path.
+    if (-not $runCandidateDirect) {
+        $action = New-ScheduledTaskAction -Execute $candidateExe `
+            -Argument ('-handover-ready "{0}" -run' -f $serviceReady) `
+            -WorkingDirectory $InstallDir
+    }
 }
 
 Register-ScheduledTask `
@@ -765,6 +774,13 @@ if ($needsHandover) {
         }
         if (-not $runCandidateDirect) { Unregister-ScheduledTask -TaskName $handoverTask -Confirm:$false -ErrorAction SilentlyContinue }
         Fail "New RemoteControlAgent task did not authenticate; restored old task. Check $iniPath" 41
+    }
+    if (-not $runCandidateDirect) {
+        # The verification instance can continue serving this session, but all
+        # future logon/watchdog launches must use the stable permanent command.
+        Register-ScheduledTask -TaskName $TaskName -Action $permanentAction `
+            -Trigger $taskTriggers -Principal $principal -Settings $settings `
+            -Force | Out-Null
     }
     if (-not $runCandidateDirect) { Unregister-ScheduledTask -TaskName $handoverTask -Confirm:$false -ErrorAction SilentlyContinue }
     if ($legacyService) {
